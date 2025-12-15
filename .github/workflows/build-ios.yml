@@ -37,9 +37,13 @@ jobs:
         make clean
         make
 
+    - name: List all build outputs
+      run: |
+        find .theos/ -type f || true
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: opainject-binary
-        path: /usr/local/bin/opainject
+        path: .theos/_/usr/local/bin/opainject
 
