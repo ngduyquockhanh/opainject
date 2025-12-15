@@ -18,6 +18,7 @@ jobs:
       run: |
         git clone --depth=1 https://github.com/theos/theos.git $HOME/theos
         echo "export THEOS=$HOME/theos" >> $GITHUB_ENV
+        echo "export THEOS_MAKE_PATH=$HOME/theos/makefiles" >> $GITHUB_ENV
         echo "export PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
 
     - name: Install dependencies
