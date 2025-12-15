@@ -41,9 +41,12 @@ jobs:
       run: |
         find .theos/ -type f || true
 
-    - name: Upload build artifacts
+    - name: Upload opainject binaries
       uses: actions/upload-artifact@v4
       with:
-        name: opainject-binary
-        path: .theos/_/usr/local/bin/opainject
+        name: opainject-binaries
+        path: |
+          .theos/obj/debug/arm64/opainject
+          .theos/obj/debug/arm64e/opainject
+          .theos/obj/debug/opainject
 
