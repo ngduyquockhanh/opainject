@@ -1,0 +1,37 @@
+name: Build for iOS
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Theos
+      run: |
+        git clone --depth=1 https://github.com/theos/theos.git $HOME/theos
+        echo "export THEOS=$HOME/theos" >> $GITHUB_ENV
+        echo "export PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
+
+    - name: Install dependencies
+      run: |
+        brew install ldid
+        # Install any other dependencies if needed
+
+    - name: Build
+      run: |
+        make clean
+        make
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: opainject-binary
+        path: .theos/_/usr/local/bin/opainject
