@@ -37,14 +37,9 @@ jobs:
         make clean
         make
 
-    # - name: Upload build artifacts
-    #   uses: actions/upload-artifact@v4
-    #   with:
-    #     name: opainject-binary
-    #     path: .theos/_/usr/local/bin/opainject
-
-    - name: Upload all build outputs
+    - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: theos-build-all
-        path: .theos/
+        name: opainject-binary
+        path: /usr/local/binopainject
+
