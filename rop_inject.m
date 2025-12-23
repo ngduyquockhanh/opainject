@@ -750,7 +750,7 @@ void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t all
 	hookM_rop(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:", dummyImp, NULL);
 
 	// CustomURLConnectionDelegate
-	hookM_rop(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:", dummyImp, NULL);
+	// hookM_rop(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:", dummyImp, NULL);
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
