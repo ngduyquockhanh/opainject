@@ -418,66 +418,66 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
-// void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
-// {
-// 	prepareForMagic(task, allImageInfoAddr);
+void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
+{
+	prepareForMagic(task, allImageInfoAddr);
 
-// 	thread_act_t pthread = 0;
-// 	kern_return_t kr = createRemotePthread(task, allImageInfoAddr, &pthread);
-// 	if(kr != KERN_SUCCESS) return;
+	thread_act_t pthread = 0;
+	kern_return_t kr = createRemotePthread(task, allImageInfoAddr, &pthread);
+	if(kr != KERN_SUCCESS) return;
 
-// 	sandboxFixup(task, pthread, pid, dylibPath, allImageInfoAddr);
+	sandboxFixup(task, pthread, pid, dylibPath, allImageInfoAddr);
 
-// 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
+	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-// 	// FIND OFFSETS
-// 	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-// 	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
-// 	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
+	// FIND OFFSETS
+	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
+	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
+	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
-// 	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
+	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
 
-// 	// CALL DLOPEN
-// 	size_t remoteDylibPathSize = 0;
-// 	vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
-// 	if(remoteDylibPath)
-// 	{
-// 		void* dlopenRet;
-// 		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
-// 		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
+	// CALL DLOPEN
+	size_t remoteDylibPathSize = 0;
+	vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
+	if(remoteDylibPath)
+	{
+		void* dlopenRet;
+		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
+		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
 
-// 		if (dlopenRet) {
-// 			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+		if (dlopenRet) {
+			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
 
-// 			sleep(1); 
-// 			printf("[injectDylibViaRop] Checking if dylib loaded...\n");
-// 			vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-// 			printf("[injectDylibViaRop] myDylibBase: 0x%llx\n", myDylibBase);
+			sleep(1); 
+			printf("[injectDylibViaRop] Checking if dylib loaded...\n");
+			vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
+			printf("[injectDylibViaRop] myDylibBase: 0x%llx\n", myDylibBase);
 			
-// 			if (myDylibBase) {
-// 				uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "_my_entrypoint");
-// 				if (myFuncAddr) {
-// 					uint64_t result = 0;
-// 					arbCall(task, pthread, &result, true, myFuncAddr, 0);
-// 					printf("[injectDylibViaRop] Called my_entrypoint! Result: %llu\n", result);
-// 				} else {
-// 					printf("[injectDylibViaRop] Could not find my_entrypoint symbol.\n");
-// 				}
-// 			} else {
-// 				printf("[injectDylibViaRop] Could not find base address of injected dylib.\n");
-// 			}
-// 		}
-// 		else {
-// 			uint64_t remoteErrorString = 0;
-// 			arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
-// 			char *errorString = task_copy_string(task, remoteErrorString);
-// 			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
-// 			free(errorString);
-// 		}
-// 	}
+			if (myDylibBase) {
+				uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "_my_entrypoint");
+				if (myFuncAddr) {
+					uint64_t result = 0;
+					arbCall(task, pthread, &result, true, myFuncAddr, 0);
+					printf("[injectDylibViaRop] Called my_entrypoint! Result: %llu\n", result);
+				} else {
+					printf("[injectDylibViaRop] Could not find my_entrypoint symbol.\n");
+				}
+			} else {
+				printf("[injectDylibViaRop] Could not find base address of injected dylib.\n");
+			}
+		}
+		else {
+			uint64_t remoteErrorString = 0;
+			arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
+			char *errorString = task_copy_string(task, remoteErrorString);
+			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
+			free(errorString);
+		}
+	}
 
-// 	thread_terminate(pthread);
-// }
+	thread_terminate(pthread);
+}
 
 // void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 // {
@@ -687,109 +687,3 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 // 	thread_terminate(pthread);
 // }
 
-void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
-{
-	prepareForMagic(task, allImageInfoAddr);
-
-	thread_act_t pthread = 0;
-	kern_return_t kr = createRemotePthread(task, allImageInfoAddr, &pthread);
-	if(kr != KERN_SUCCESS) return;
-
-	sandboxFixup(task, pthread, pid, dylibPath, allImageInfoAddr);
-
-	printf("[injectDylibViaRop] Preparation done!\n");
-
-	// Create symlink to bypass RASP path check
-	char symlinkPath[256];
-	snprintf(symlinkPath, sizeof(symlinkPath), "/tmp/lib_%d.dylib", pid);
-	unlink(symlinkPath);
-	symlink(dylibPath, symlinkPath);
-
-	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
-
-	size_t remotePathSize = 0;
-	vm_address_t remotePath = writeStringToTask(task, symlinkPath, &remotePathSize);
-	
-	if (remotePath)
-	{
-		void* dlopenRet = NULL;
-		
-		printf("[injectDylibViaRop] Calling dlopen...\n");
-		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remotePath, RTLD_NOW);
-		
-		vm_deallocate(task, remotePath, remotePathSize);
-
-		if (dlopenRet) {
-			printf("[injectDylibViaRop] ✓ dlopen succeeded!\n");
-
-			vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-			printf("[injectDylibViaRop] Dylib base: 0x%lx\n", (unsigned long)myDylibBase);
-			
-			if (myDylibBase) {
-				uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "_my_entrypoint");
-				printf("[injectDylibViaRop] _my_entrypoint: 0x%llx\n", myFuncAddr);
-				
-				if (myFuncAddr) {
-					printf("[injectDylibViaRop] >>> Patching dylib to call my_entrypoint...\n");
-					
-					// ===== PATCH DYLIB ENTRY =====
-					// Tính offset từ dylib base tới hàm
-					int64_t offset = (int64_t)myFuncAddr - (int64_t)myDylibBase;
-					printf("[injectDylibViaRop] Offset: %lld (0x%llx)\n", offset, offset);
-					
-					// BL instruction: gọi hàm (offset tính từ PC)
-					// BL = 0x94000000 + 26-bit signed offset
-					uint32_t blInst = 0x94000000;
-					blInst |= (((offset >> 2) & 0x3FFFFFF));
-					
-					// RET instruction
-					uint32_t retInst = 0xd65f03c0;
-					
-					uint32_t patch[] = { blInst, retInst };
-					
-					printf("[injectDylibViaRop] Writing patch at 0x%lx\n", (unsigned long)myDylibBase);
-					
-					// Make writable
-					kr = vm_protect(task, myDylibBase, 4096, TRUE, 
-								   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-					
-					if (kr == KERN_SUCCESS) {
-						// Write patch
-						kr = vm_write(task, myDylibBase, (vm_address_t)patch, sizeof(patch));
-						
-						if (kr == KERN_SUCCESS) {
-							printf("[injectDylibViaRop] ✓ Patch written!\n");
-							
-							// Make executable again
-							vm_protect(task, myDylibBase, 4096, TRUE, 
-									  VM_PROT_READ | VM_PROT_EXECUTE);
-							
-							// Flush instruction cache
-							sys_icache_invalidate((void*)myDylibBase, 4096);
-							
-							printf("[injectDylibViaRop] Constructor patched - my_entrypoint will be called on next dylib load\n");
-						} else {
-							printf("[injectDylibViaRop] Failed to write patch: %s\n", mach_error_string(kr));
-						}
-					} else {
-						printf("[injectDylibViaRop] Failed to make writable: %s\n", mach_error_string(kr));
-					}
-					
-				} else {
-					printf("[injectDylibViaRop] Could not find _my_entrypoint\n");
-				}
-			} else {
-				printf("[injectDylibViaRop] Could not find dylib base\n");
-			}
-
-		} else {
-			printf("[injectDylibViaRop] dlopen FAILED\n");
-		}
-	}
-
-	// Clean up
-	unlink(symlinkPath);
-	
-	thread_terminate(pthread);
-}
