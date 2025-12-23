@@ -616,23 +616,23 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 	// Walk class hierarchy
 	uint64_t searchedClass = classPtr;
 	printf("[hookM_rop] Starting to search for method %s in class hierarchy of %s...\n", selName, className);
-	
+
 	while (searchedClass) {
 		// Get method list
 		uint64_t methodListPtr = 0;
 		uint32_t methodCount = 0;
 		vm_address_t remoteCount = 0;
-		// vm_allocate(task, &remoteCount, sizeof(uint32_t), VM_FLAGS_ANYWHERE);
+		vm_allocate(task, &remoteCount, sizeof(uint32_t), VM_FLAGS_ANYWHERE);
 		arbCall(task, pthread, &methodListPtr, true, class_copyMethodListAddr, 2, searchedClass, &methodCount);
 		printf("[hookM_rop] class_copyMethodList returned method list at 0x%llX for class at 0x%llX\n", methodListPtr, searchedClass);
-		printf("[hookM_rop] remoteCount value: 0x%X\n", methodCount);
-		// if (!methodListPtr) {
-		// 	vm_deallocate(task, remoteCount, sizeof(uint32_t));
-		// 	searchedClass = 0;
-		// 	break;
-		// }
+		
+		if (!methodListPtr) {
+			vm_deallocate(task, remoteCount, sizeof(uint32_t));
+			searchedClass = 0;
+			break;
+		}
 		printf("[hookM_rop] Scanning class at 0x%llX for methods...\n", searchedClass);
-		// vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, NULL);
+		vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, NULL);
 		printf("[hookM_rop] Found %u methods in class at 0x%llX\n", methodCount, searchedClass);
 
 		for (uint32_t i = 0; i < methodCount; i++) {
