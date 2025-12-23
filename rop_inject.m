@@ -442,42 +442,25 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 }
 
 vm_address_t writeSSLChallengeBypassStub(task_t task) {
-	// mov x0, #0              ; disposition = NSURLSessionAuthChallengeUseCredential (0)
+    // mov x0, #0              ; disposition = NSURLSessionAuthChallengeUseCredential (0)
     // mov x1, #0              ; credential = NULL
     // blr x3                  ; call completion handler (preserve LR)
-    // mov x0, #1              ; return YES
-    // ret
-	
-	uint32_t stub[] = {
-		0xd2800000,             // mov x0, #0
+    // ret                     ; return (void)
+    uint32_t stub[] = {
+        0xd2800000,             // mov x0, #0
         0xd2800001,             // mov x1, #0
         0xd63f0060,             // blr x3
-        0xd2800020,             // mov x0, #1
         0xd65f03c0              // ret
-	};
-	
-	vm_address_t remoteStub = 0;
-	kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
-	if (kr != KERN_SUCCESS) {
-		printf("[-] Failed to allocate stub: %s\n", mach_error_string(kr));
-		return 0;
-	}
-	
-	kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-	if (kr != KERN_SUCCESS) {
-		printf("[-] Failed to protect stub: %s\n", mach_error_string(kr));
-		vm_deallocate(task, remoteStub, sizeof(stub));
-		return 0;
-	}
-	
-	kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
-	if (kr != KERN_SUCCESS) {
-		printf("[-] Failed to write stub: %s\n", mach_error_string(kr));
-		vm_deallocate(task, remoteStub, sizeof(stub));
-		return 0;
-	}
-	
-	return remoteStub;
+    };
+    // ...allocate, protect, write như cũ...
+    vm_address_t remoteStub = 0;
+    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) return 0;
+    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    return remoteStub;
 }
 
 
