@@ -629,7 +629,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		}
 		// Truyền remoteCount (địa chỉ remote) vào class_copyMethodList qua arbCall
 		arbCall(task, pthread, &methodListPtr, true, class_copyMethodListAddr, 2, searchedClass, remoteCount);
-		printf("[hookM_rop] class_copyMethodList returned method list at 0x%llX for class at 0x%llX\n", methodListPtr, searchedClass);
+		printf("[hookM_rop] class_copyMethodList returned method1 list at 0x%llX for class at 0x%llX\n", methodListPtr, searchedClass);
 		if (!methodListPtr) {
 			vm_deallocate(task, remoteCount, sizeof(uint32_t));
 			searchedClass = 0;
