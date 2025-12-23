@@ -635,6 +635,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 			uint64_t methodSel = 0;
 			arbCall(task, pthread, &methodSel, true, method_getNameAddr, 1, methodPtr);
 			uint64_t isEqual = 0;
+			printf("[hookM_rop] Comparing method %u selector 0x%llX with 0x%llX...\n", i, methodSel, selPtr);
 			arbCall(task, pthread, &isEqual, true, sel_isEqualAddr, 2, methodSel, selPtr);
 			if (isEqual) {
 				printf("[hookM_rop] Found method for selector %s in class at 0x%llX\n", selName, searchedClass);
