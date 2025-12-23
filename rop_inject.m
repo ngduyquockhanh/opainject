@@ -442,15 +442,18 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 }
 
 vm_address_t writeSSLChallengeBypassStub(task_t task) {
-	// ARM64 Assembly to call completion handler:
 	// mov x0, #0              ; disposition = NSURLSessionAuthChallengeUseCredential (0)
-	// mov x1, #0              ; credential = NULL
-	// br x3                   ; jump to completion handler (in x3)
+    // mov x1, #0              ; credential = NULL
+    // blr x3                  ; call completion handler (preserve LR)
+    // mov x0, #1              ; return YES
+    // ret
 	
 	uint32_t stub[] = {
 		0xd2800000,             // mov x0, #0
-		0xd2800001,             // mov x1, #0
-		0xd61f0060              // br x3
+        0xd2800001,             // mov x1, #0
+        0xd63f0060,             // blr x3
+        0xd2800020,             // mov x0, #1
+        0xd65f03c0              // ret
 	};
 	
 	vm_address_t remoteStub = 0;
