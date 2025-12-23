@@ -619,7 +619,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		// Get method list
 		uint64_t methodListPtr = 0;
 		uint32_t methodCount = 0;
-		// vm_address_t remoteCount = 0;
+		vm_address_t remoteCount = 0;
 		// vm_allocate(task, &remoteCount, sizeof(uint32_t), VM_FLAGS_ANYWHERE);
 		arbCall(task, pthread, &methodListPtr, true, class_copyMethodListAddr, 2, searchedClass, &methodCount);
 		printf("[hookM_rop] class_copyMethodList returned method list at 0x%llX for class at 0x%llX\n", methodListPtr, searchedClass);
