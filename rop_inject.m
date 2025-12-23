@@ -636,8 +636,10 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 			break;
 		}
 		printf("[hookM_rop] Scanning class at 0x%llX for methods...\n", searchedClass);
-		// Đọc methodCount từ remoteCount (vùng nhớ remote)
+		// Debug: log trước khi đọc methodCount
+		printf("[hookM_rop] About to call vm_read_overwrite(task=0x%llX, remoteCount=0x%llX, sizeof(uint32_t)=%zu)\n", (uint64_t)task, (uint64_t)remoteCount, sizeof(uint32_t));
 		kr = vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, NULL);
+		printf("[hookM_rop] vm_read_overwrite returned kr=%d (%s)\n", kr, mach_error_string(kr));
 		if (kr != KERN_SUCCESS) {
 			printf("[hookM_rop] vm_read_overwrite failed: %s\n", mach_error_string(kr));
 			vm_deallocate(task, remoteCount, sizeof(uint32_t));
@@ -646,20 +648,9 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		}
 		printf("[hookM_rop] Found %u methods in class at 0x%llX\n", methodCount, searchedClass);
 
-		// Bảo vệ: nếu methodCount quá lớn, dừng lại để tránh crash
-		if (methodCount > 1000) {
-			printf("[hookM_rop] WARNING: methodCount quá lớn (%u), bỏ qua để tránh crash!\n", methodCount);
-			vm_deallocate(task, remoteCount, sizeof(uint32_t));
-			break;
-		}
-
 		for (uint32_t i = 0; i < methodCount; i++) {
 			uint64_t methodPtr = 0;
-			kern_return_t kr_read = vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
-			if (kr_read != KERN_SUCCESS) {
-				printf("[hookM_rop] vm_read_overwrite methodPtr lỗi tại i=%u: %s\n", i, mach_error_string(kr_read));
-				break;
-			}
+			vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
 			uint64_t methodSel = 0;
 			arbCall(task, pthread, &methodSel, true, method_getNameAddr, 1, methodPtr);
 			uint64_t isEqual = 0;
