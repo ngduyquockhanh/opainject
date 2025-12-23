@@ -345,7 +345,12 @@ int injectDylibViaShellcode(task_t task, pid_t pid, const char* dylibPath, vm_ad
 
 		printf("constructed sandbox_extension_consume payload!\n");
 
-		runPayload(task, (uint8_t*)payload, payloadSize, codeStart, allImageInfoAddr);
+		kern_return_t kr = runPayload(task, (uint8_t*)payload, payloadSize, codeStart, allImageInfoAddr);
+		if (kr == KERN_SUCCESS) {
+			printf("[+] Sandbox extension injected successfully!\n");
+		} else {
+			printf("[-] Sandbox extension injection failed: %s\n", mach_error_string(kr));
+		}
 		free(payload);
 	}
 	else
@@ -379,7 +384,12 @@ int injectDylibViaShellcode(task_t task, pid_t pid, const char* dylibPath, vm_ad
 
 	printf("constructed dlopen payload!\n");
 
-	runPayload(task, (uint8_t*)payload, payloadSize, codeStart, allImageInfoAddr);
+	kern_return_t kr2 = runPayload(task, (uint8_t*)payload, payloadSize, codeStart, allImageInfoAddr);
+	if (kr2 == KERN_SUCCESS) {
+		printf("[+] Dylib injected (dlopen) successfully!\n");
+	} else {
+		printf("[-] Dylib injection (dlopen) failed: %s\n", mach_error_string(kr2));
+	}
 	free(payload);
 
 	// STEP FIVE: detach from process
