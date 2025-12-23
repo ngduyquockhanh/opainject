@@ -37,6 +37,10 @@
 #import "thread_utils.h"
 #import "arm64.h"
 
+#define NSURLSessionAuthChallengeUseCredential 0
+#define NSURLSessionAuthChallengePerformDefaultHandling 1
+#define NSURLSessionAuthChallengeCancelAuthenticationChallenge 2
+#define NSURLSessionAuthChallengeUseCredentialForNextChallenge 3
 
 typedef struct {
     uint32_t entsize_and_flags;
@@ -582,8 +586,45 @@ vm_address_t writeObjCBypassStub(task_t task) {
 	return remoteStub;
 }
 
+vm_address_t writeSSLChallengeBypassStub(task_t task) {
+	// ARM64 Assembly to call completion handler:
+	// mov x0, #0              ; disposition = NSURLSessionAuthChallengeUseCredential (0)
+	// mov x1, #0              ; credential = NULL
+	// br x3                   ; jump to completion handler (in x3)
+	
+	uint32_t stub[] = {
+		0xd2800000,             // mov x0, #0
+		0xd2800001,             // mov x1, #0
+		0xd61f0060              // br x3
+	};
+	
+	vm_address_t remoteStub = 0;
+	kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) {
+		printf("[-] Failed to allocate stub: %s\n", mach_error_string(kr));
+		return 0;
+	}
+	
+	kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+	if (kr != KERN_SUCCESS) {
+		printf("[-] Failed to protect stub: %s\n", mach_error_string(kr));
+		vm_deallocate(task, remoteStub, sizeof(stub));
+		return 0;
+	}
+	
+	kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+	if (kr != KERN_SUCCESS) {
+		printf("[-] Failed to write stub: %s\n", mach_error_string(kr));
+		vm_deallocate(task, remoteStub, sizeof(stub));
+		return 0;
+	}
+	
+	return remoteStub;
+}
 
-int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* className, const char* selName, uint64_t newImpAddr, uint64_t* oldImpOut) {
+
+int hookM_rop_with_completion(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
+                              const char* className, const char* selName, uint64_t newImpAddr, uint64_t* oldImpOut) {
 	// Resolve runtime symbols
 	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
 	uint64_t objc_getClassAddr = remoteDlSym(task, libObjcAddr, "_objc_getClass");
@@ -708,49 +749,22 @@ cleanup:
 	return 1;
 }
 
-// Patch all known SSL pinning related C functions and Objective-C methods
 void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
-	// Security.framework
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluate");
-	// hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateWithError");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateAsync");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateAsyncWithError");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateFastAsync");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustSetPolicies");
-	// hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecKeyVerifySignature");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecKeyRawVerify");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLHandshake");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLSetSessionOption");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLCreateContext");
-
-	// // BoringSSL
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_CTX_set_custom_verify");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_set_custom_verify");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_get_psk_identity");
-
-	// // libsystem_coretls
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/system/libsystem_coretls.dylib", "tls_helper_create_peer_trust");
-	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libnetwork.dylib", "nw_tls_create_peer_trust");
-
-	// // SecIsInternalRelease
-	// hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecIsInternalRelease");
-
-	// // AFNetworking
-	uint64_t dummyImp = writeObjCBypassStub(task); // stub trả về ret
-	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:", dummyImp, NULL);
-	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:", dummyImp, NULL);
-	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:", dummyImp, NULL);
-	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:withPinnedCertificates:", dummyImp, NULL);
-
-	// // TrustKit
-	// hookM_rop(task, pthread, allImageInfoAddr, "TSKPinningValidator", "evaluateTrust:forHostname:", dummyImp, NULL);
-
-	// NSURLSessionDelegate
-	hookM_rop(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", "_onqueue_didReceiveChallenge:request:withCompletion:", dummyImp, NULL);
-	hookM_rop(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:", dummyImp, NULL);
-
-	// CustomURLConnectionDelegate
-	// hookM_rop(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:", dummyImp, NULL);
+	// NSURLSessionDelegate - tạo stub properly
+	uint64_t completionBypassStub = writeSSLChallengeBypassStub(task);
+	if (!completionBypassStub) {
+		printf("[-] Failed to create SSL challenge bypass stub\n");
+		return;
+	}
+	
+	printf("[+] Created SSL challenge bypass stub at 0x%llX\n", completionBypassStub);
+	
+	// Hook các method quan trọng
+	hookM_rop_with_completion(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", 
+		"_onqueue_didReceiveChallenge:request:withCompletion:", completionBypassStub, NULL);
+	
+	hookM_rop_with_completion(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", 
+		"_onqueue_sendSessionChallenge:completionHandler:", completionBypassStub, NULL);
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
