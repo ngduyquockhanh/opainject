@@ -684,14 +684,20 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 				
 				if (searchedClass == classPtr) {
 					// Save old IMP
+					printf("[hookM_rop] Replacing IMP in original class\n");
 					if (oldImpOut) {
 						arbCall(task, pthread, oldImpOut, true, method_getImplementationAddr, 1, methodPtr);
 					}
+					printf("[hookM_rop] Old IMP: 0x%llX\n", oldImpOut ? *oldImpOut : 0);
 					// Set new IMP
 					uint64_t oldImpTmp = 0;
+					printf("[hookM_rop] Setting new IMP to 0x%llX\n", newImpAddr);
 					arbCall(task, pthread, &oldImpTmp, true, method_setImplementationAddr, 2, methodPtr, newImpAddr);
+					printf("[hookM_rop] method_setImplementation returned old IMP: 0x%llX\n", oldImpTmp);
 					if (oldImpOut) *oldImpOut = oldImpTmp;
+					printf("[hookM_rop] IMP replaced successfully in original class\n");
 				} else {
+					printf("[hookM_rop] Method not found in original class, adding to subclass at 0x%llX\n", searchedClass);
 					// Add method to subclass
 					uint64_t typeEncoding = 0;
 					arbCall(task, pthread, &typeEncoding, true, method_getTypeEncodingAddr, 1, methodPtr);
@@ -699,7 +705,6 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 				}
 				
 				vm_deallocate(task, remoteCount, sizeof(uint32_t));
-				return 1;
 			}
 		}
 		
