@@ -479,6 +479,118 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 // 	thread_terminate(pthread);
 // }
 
+// Helper: Write a stub that returns 0 (errSecSuccess) for OSStatus functions
+vm_address_t writeReturnZeroStub(task_t task) {
+    // ARM64: mov w0, #0; ret
+    uint32_t stub[] = { 0x52800000, 0xd65f03c0 };
+    vm_address_t remoteStub = 0;
+    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) return 0;
+    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) return 0;
+    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+    if (kr != KERN_SUCCESS) return 0;
+    return remoteStub;
+}
+
+void hookCFunctionReturnZero(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* libPath, const char* symName) {
+    vm_address_t libAddr = getRemoteImageAddress(task, allImageInfoAddr, libPath);
+    if (!libAddr) {
+        printf("[-] Could not find %s\n", libPath);
+        return;
+    }
+    uint64_t funcAddr = remoteDlSym(task, libAddr, symName);
+    if (!funcAddr) {
+        printf("[-] Could not find symbol %s\n", symName);
+        return;
+    }
+    vm_address_t stub = writeReturnZeroStub(task);
+    if (!stub) {
+        printf("[-] Could not allocate stub\n");
+        return;
+    }
+    // Overwrite first instruction with branch to stub
+    // ARM64: b <stub>
+    uint32_t branch = 0x14000000 | (((stub - funcAddr) >> 2) & 0x3FFFFFF);
+    vm_write(task, funcAddr, (vm_address_t)&branch, sizeof(branch));
+    printf("[+] Patched %s to always return 0\n", symName);
+}
+
+// Example usage for SecTrustEvaluate
+void hook_SecTrustEvaluate(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
+    hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluate");
+}
+
+// Example usage for SSLHandshake
+void hook_SSLHandshake(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
+    hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLHandshake");
+}
+
+// Helper: Write a stub for Objective-C methods that disables pinning
+vm_address_t writeObjCBypassStub(task_t task) {
+    // ARM64: ret (does nothing, returns 0/YES)
+    uint32_t stub[] = { 0xd65f03c0 };
+    vm_address_t remoteStub = 0;
+    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) return 0;
+    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) return 0;
+    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+    if (kr != KERN_SUCCESS) return 0;
+    return remoteStub;
+}
+
+// Patch an Objective-C instance method to a stub
+void hookObjCMethodBypass(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* className, const char* selName) {
+    vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
+    uint64_t objc_getClassAddr = remoteDlSym(task, libObjcAddr, "_objc_getClass");
+    uint64_t sel_registerNameAddr = remoteDlSym(task, libObjcAddr, "_sel_registerName");
+    uint64_t class_getInstanceMethodAddr = remoteDlSym(task, libObjcAddr, "_class_getInstanceMethod");
+    uint64_t method_setImplementationAddr = remoteDlSym(task, libObjcAddr, "_method_setImplementation");
+
+    // Write class and selector names into target
+    size_t classLen, selLen;
+    vm_address_t remoteClassName = writeStringToTask(task, className, &classLen);
+    vm_address_t remoteSelName = writeStringToTask(task, selName, &selLen);
+
+    uint64_t classPtr = 0;
+    arbCall(task, pthread, &classPtr, true, objc_getClassAddr, 1, remoteClassName);
+
+    uint64_t selPtr = 0;
+    arbCall(task, pthread, &selPtr, true, sel_registerNameAddr, 1, remoteSelName);
+
+    uint64_t methodPtr = 0;
+    arbCall(task, pthread, &methodPtr, true, class_getInstanceMethodAddr, 2, classPtr, selPtr);
+
+    vm_address_t stub = writeObjCBypassStub(task);
+    if (!stub) {
+        printf("[-] Could not allocate stub for %s %s\n", className, selName);
+        return;
+    }
+
+    // Patch method implementation
+    arbCall(task, pthread, NULL, true, method_setImplementationAddr, 2, methodPtr, stub);
+
+    vm_deallocate(task, remoteClassName, classLen);
+    vm_deallocate(task, remoteSelName, selLen);
+
+    printf("[+] Patched [%s %s] to bypass SSL pinning\n", className, selName);
+}
+
+// Example usage for AFNetworking
+void hook_AFNetworking(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
+    hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:");
+    hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:");
+}
+
+
+void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
+    hook_SecTrustEvaluate(task, pthread, allImageInfoAddr);
+    hook_SSLHandshake(task, pthread, allImageInfoAddr);
+    hook_AFNetworking(task, pthread, allImageInfoAddr);
+    // Add more hooks as needed (TrustKit, CustomURLConnectionDelegate, etc.)
+}
+
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 {
 	prepareForMagic(task, allImageInfoAddr);
@@ -491,134 +603,52 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	// Lấy base address của libobjc.A.dylib
-	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
-	printf("libobjc.A.dylib base: 0x%llx\n", (unsigned long long)libObjcAddr);
+	sslkillswitch_rop_hooks(task, pthread, allImageInfoAddr);
+	
 
-	// Resolve địa chỉ hàm objc_copyClassList
-	uint64_t objcCopyClassListAddr = remoteDlSym(task, libObjcAddr, "_objc_copyClassList");
-	printf("objc_copyClassList address: 0x%llx\n", (unsigned long long)objcCopyClassListAddr);
+	// // Lấy base address của libobjc.A.dylib
+	// vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
+	// printf("libobjc.A.dylib base: 0x%llx\n", (unsigned long long)libObjcAddr);
+
+	// // Resolve địa chỉ hàm objc_copyClassList
+	// uint64_t objcCopyClassListAddr = remoteDlSym(task, libObjcAddr, "_objc_copyClassList");
+	// printf("objc_copyClassList address: 0x%llx\n", (unsigned long long)objcCopyClassListAddr);
 
 
-	size_t remoteCountLen = sizeof(uint32_t);
-	vm_address_t remoteCountPtr = 0;
-	kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
-	if (kr != KERN_SUCCESS) {
-		printf("ERROR: Unable to allocate memory for count\n");
-		return;
-	}
-
-	uint64_t classArrayPtr = 0;
-	arbCall(task, pthread, &classArrayPtr, true, objcCopyClassListAddr, 1, remoteCountPtr);
-	printf("[injectDylibViaRop] objc_copyClassList returned pointer: 0x%llx\n", classArrayPtr);
-
-	uint32_t classCount = 0;
-	vm_size_t outSize = 0;
-	kr = vm_read_overwrite(task, remoteCountPtr, sizeof(classCount), (vm_address_t)&classCount, &outSize);
-	printf("Number of classes: %u\n", classCount);
-
-	for (uint32_t i = 0; i < classCount; i++) {
-		uint64_t classPtr = 0;
-		kr = vm_read_overwrite(task, classArrayPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&classPtr, &outSize);
-		if (kr != KERN_SUCCESS) continue;
-
-		// Gọi ROP để lấy tên class: class_getName
-		uint64_t classGetNameAddr = remoteDlSym(task, libObjcAddr, "_class_getName");
-		uint64_t namePtr = 0;
-		arbCall(task, pthread, &namePtr, true, classGetNameAddr, 1, classPtr);
-
-		if (namePtr) {
-			char *className = task_copy_string(task, namePtr);
-			printf("Class[%u]: %s\n", i, className ? className : "(null)");
-			if (className) free(className);
-		}
-	}
-	vm_deallocate(task, remoteCountPtr, remoteCountLen);
-
-	// FIND OFFSETS
-	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
-	// uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
-
-	// printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", dlopenAddr, dlerrorAddr);
-
-	// // CALL DLOPEN
-	// size_t remoteDylibPathSize = 0;
-	// vm_address_t remoteDylibPath = writeStringToTask(task, dylibPath, &remoteDylibPathSize);
-	// if(remoteDylibPath)
-	// {
-	// 	void* dlopenRet;
-	// 	printf("[injectDylibViaRop] >>> Calling dlopen with RTLD_NOW\n");
-	// 	arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
-	// 	vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
-
-	// 	if (dlopenRet) {
-	// 		printf("[injectDylibViaRop] dlopen succeeded, handle: %p\n", dlopenRet);
-			
-	// 		sleep(1); // Chờ constructor
-
-	// 		// ===== KIỂM TRA DYLIB LOAD =====
-	// 		printf("[injectDylibViaRop] Checking if dylib loaded...\n");
-	// 		vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-	// 		printf("[injectDylibViaRop] myDylibBase: 0x%lx\n", (unsigned long)myDylibBase);
-			
-	// 		if (!myDylibBase) {
-	// 			printf("[injectDylibViaRop] ERROR: dylib not in image list!\n");
-	// 			printf("[injectDylibViaRop] Listing all loaded images:\n");
-	// 			// Dump tất cả images
-	// 			// TODO: add code để list images
-	// 			goto cleanup;
-	// 		}
-
-	// 		// ===== TRY GỌILỖI SIMPLE FUNCTION TRƯỚC =====
-	// 		// Thay vì gọi my_entrypoint, hãy test gọi strlen trước
-	// 		printf("[injectDylibViaRop] TEST: Calling strlen (system function)...\n");
-	// 		uint64_t strlenAddr = remoteDlSym(task, getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libSystem.B.dylib"), "_strlen");
-			
-	// 		if (strlenAddr) {
-	// 			uint64_t testResult = 0;
-	// 			const char* testStr = "hello";
-	// 			vm_address_t remoteStr = writeStringToTask(task, testStr, NULL);
-				
-	// 			printf("[injectDylibViaRop] Calling strlen(\"%s\") at 0x%llx with arg at 0x%lx...\n", testStr, strlenAddr, (unsigned long)remoteStr);
-	// 			arbCall(task, pthread, &testResult, true, strlenAddr, 1, remoteStr);
-	// 			printf("[injectDylibViaRop] strlen returned: %llu (expected 5)\n", testResult);
-				
-	// 			vm_deallocate(task, remoteStr, strlen(testStr) + 1);
-				
-	// 			if (testResult == 5) {
-	// 				printf("[injectDylibViaRop] ✓ strlen works! System functions OK\n");
-	// 			}
-	// 		}
-
-	// 		// ===== GỌI MY_ENTRYPOINT =====
-	// 		uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "_my_entrypoint");
-	// 		printf("[injectDylibViaRop] _my_entrypoint: 0x%llx\n", myFuncAddr);
-			
-	// 		if (myFuncAddr) {
-	// 			printf("[injectDylibViaRop] >>> Calling my_entrypoint at 0x%llx...\n", myFuncAddr);
-				
-	// 			uint64_t result = 0;
-	// 			time_t startCall = time(NULL);
-				
-	// 			arbCall(task, pthread, &result, true, myFuncAddr, 0);
-				
-	// 			time_t elapsed = time(NULL) - startCall;
-	// 			printf("[injectDylibViaRop] my_entrypoint returned after %ld seconds, result: %llu\n", elapsed, result);
-	// 		} else {
-	// 			printf("[injectDylibViaRop] ERROR: Could not find _my_entrypoint\n");
-	// 		}
-
-	// 	} else {
-	// 		printf("[injectDylibViaRop] dlopen FAILED!\n");
-	// 		uint64_t remoteErrorString = 0;
-	// 		arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
-	// 		char *errorString = task_copy_string(task, remoteErrorString);
-	// 		printf("[injectDylibViaRop] dlerror: %s\n", errorString ? errorString : "(null)");
-	// 		if (errorString) free(errorString);
-	// 	}
+	// size_t remoteCountLen = sizeof(uint32_t);
+	// vm_address_t remoteCountPtr = 0;
+	// kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
+	// if (kr != KERN_SUCCESS) {
+	// 	printf("ERROR: Unable to allocate memory for count\n");
+	// 	return;
 	// }
 
-// cleanup:
+	// uint64_t classArrayPtr = 0;
+	// arbCall(task, pthread, &classArrayPtr, true, objcCopyClassListAddr, 1, remoteCountPtr);
+	// printf("[injectDylibViaRop] objc_copyClassList returned pointer: 0x%llx\n", classArrayPtr);
+
+	// uint32_t classCount = 0;
+	// vm_size_t outSize = 0;
+	// kr = vm_read_overwrite(task, remoteCountPtr, sizeof(classCount), (vm_address_t)&classCount, &outSize);
+	// printf("Number of classes: %u\n", classCount);
+
+	// for (uint32_t i = 0; i < classCount; i++) {
+	// 	uint64_t classPtr = 0;
+	// 	kr = vm_read_overwrite(task, classArrayPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&classPtr, &outSize);
+	// 	if (kr != KERN_SUCCESS) continue;
+
+	// 	// Gọi ROP để lấy tên class: class_getName
+	// 	uint64_t classGetNameAddr = remoteDlSym(task, libObjcAddr, "_class_getName");
+	// 	uint64_t namePtr = 0;
+	// 	arbCall(task, pthread, &namePtr, true, classGetNameAddr, 1, classPtr);
+
+	// 	if (namePtr) {
+	// 		char *className = task_copy_string(task, namePtr);
+	// 		printf("Class[%u]: %s\n", i, className ? className : "(null)");
+	// 		if (className) free(className);
+	// 	}
+	// }
+	// vm_deallocate(task, remoteCountPtr, remoteCountLen);
+
 	thread_terminate(pthread);
 }
