@@ -594,7 +594,6 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	// FIND OFFSETS
 	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
 	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
-	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
 	printf("[injectDylibViaRop] dlopen: 0x%llX\n", dlopenAddr);
 
