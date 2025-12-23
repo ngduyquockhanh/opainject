@@ -491,19 +491,25 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	vm_address_t libSystemAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libSystem.B.dylib");
-	printf("libSystem.B.dylib base: 0x%llx\n", (unsigned long long)libSystemAddr);	
-	uint64_t strlenAddr = remoteDlSym(task, libSystemAddr, "_strlen");
+	// Lấy base address của libdyld.dylib
+	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
+	printf("libdyld.dylib base: 0x%llx\n", (unsigned long long)libDyldAddr);
 
-	const char* testStr = "hello";
-	size_t remoteStrLen = 0;
-	vm_address_t remoteStr = writeStringToTask(task, testStr, &remoteStrLen);
+	// Resolve địa chỉ hàm dlerror
+	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
+	printf("dlerror address: 0x%llx\n", (unsigned long long)dlerrorAddr);
 
-	uint64_t strlenResult = 0;
-	arbCall(task, pthread, &strlenResult, true, strlenAddr, 1, remoteStr);
-	printf("[injectDylibViaRop] strlen(\"%s\") returned: %llu (expected 5)\n", testStr, strlenResult);
+	// Gọi hàm dlerror (không cần tham số)
+	uint64_t errorStrPtr = 0;
+	arbCall(task, pthread, &errorStrPtr, true, dlerrorAddr, 0);
+	printf("[injectDylibViaRop] dlerror returned pointer: 0x%llx\n", errorStrPtr);
 
-	vm_deallocate(task, remoteStr, remoteStrLen);
+	// Nếu trả về pointer hợp lệ, có thể đọc chuỗi lỗi từ process target
+	if (errorStrPtr) {
+		char *errorString = task_copy_string(task, errorStrPtr);
+		printf("[injectDylibViaRop] dlerror string: %s\n", errorString ? errorString : "(null)");
+		if (errorString) free(errorString);
+	}
 
 	// FIND OFFSETS
 	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
