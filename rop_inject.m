@@ -492,6 +492,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
 	vm_address_t libSystemAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libSystem.B.dylib");
+	printf("libSystem.B.dylib base: 0x%llx\n", (unsigned long long)libSystemAddr);	
 	uint64_t strlenAddr = remoteDlSym(task, libSystemAddr, "_strlen");
 
 	const char* testStr = "hello";
