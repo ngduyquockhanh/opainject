@@ -659,7 +659,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 			vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
 			uint64_t methodSel = 0;
 			arbCall(task, pthread, &methodSel, true, method_getNameAddr, 1, methodPtr);
-			int isEqual = 0;
+			uint64_t isEqual = 0;
 			arbCall(task, pthread, &isEqual, true, sel_isEqualAddr, 2, methodSel, selPtr);
 			if (isEqual) {
 				if (searchedClass == classPtr) {
