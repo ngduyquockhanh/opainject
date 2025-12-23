@@ -450,7 +450,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 			vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
 			if (myDylibBase) {
-				uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "my_entrypoint");
+				uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "_my_entrypoint");
 				if (myFuncAddr) {
 					arbCall(task, pthread, NULL, false, myFuncAddr, 0);
 					printf("[injectDylibViaRop] Called my_entrypoint!\n");
