@@ -10,6 +10,7 @@
 #import <mach-o/nlist.h>
 #import <mach-o/reloc.h>
 #import <mach-o/dyld_images.h>
+#import <time.h>
 
 struct arm64_thread_full_state* thread_save_state_arm64(thread_act_t thread)
 {
@@ -94,14 +95,60 @@ bool thread_restore_state_arm64(thread_act_t thread, struct arm64_thread_full_st
 	return success;
 }
 
+// kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm_unified_thread_state* stateOut)
+// {
+// 	mach_msg_type_number_t stateToObserveCount = ARM_THREAD_STATE64_COUNT;
+// 	struct arm_unified_thread_state stateToObserve;
+
+// 	int errCount = 0;
+// 	while(1)
+// 	{
+// 		kern_return_t kr = thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&stateToObserve.ts_64, &stateToObserveCount);
+// 		if(kr != KERN_SUCCESS)
+// 		{
+// 			if (pcToWait == 0) return kr;
+
+// 			errCount++;
+// 			if(errCount >= 5)
+// 			{
+// 				return kr;
+// 			}
+// 			continue;
+// 		}
+
+// 		errCount = 0;
+
+// 		// wait until pc matches with infinite loop rop gadget
+// 		uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(stateToObserve.ts_64);
+// 		if(pc == pcToWait) {
+// 			break;
+// 		}
+// 	}
+
+// 	if(stateOut)
+// 	{
+// 		*stateOut = stateToObserve;
+// 	}
+
+// 	return KERN_SUCCESS;
+// }
+
 kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm_unified_thread_state* stateOut)
 {
 	mach_msg_type_number_t stateToObserveCount = ARM_THREAD_STATE64_COUNT;
 	struct arm_unified_thread_state stateToObserve;
 
 	int errCount = 0;
+	time_t startTime = time(NULL);
+	int iterations = 0;
+	uint64_t lastPC = 0;
+	int pcChanges = 0;
+	
+	printf("[wait_for_thread] Waiting for PC=0x%llx (timeout: 5s)...\n", pcToWait);
+
 	while(1)
 	{
+		iterations++;
 		kern_return_t kr = thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&stateToObserve.ts_64, &stateToObserveCount);
 		if(kr != KERN_SUCCESS)
 		{
@@ -110,6 +157,7 @@ kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm
 			errCount++;
 			if(errCount >= 5)
 			{
+				printf("[wait_for_thread] ERROR after %d iterations: %s\n", iterations, mach_error_string(kr));
 				return kr;
 			}
 			continue;
@@ -117,11 +165,32 @@ kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm
 
 		errCount = 0;
 
-		// wait until pc matches with infinite loop rop gadget
 		uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(stateToObserve.ts_64);
+		uint64_t lr = stateToObserve.ts_64.__lr;
+		uint64_t sp = stateToObserve.ts_64.__sp;
+		
+		// Log PC changes
+		if (pc != lastPC) {
+			printf("[wait_for_thread] [%d] PC: 0x%llx (LR: 0x%llx, SP: 0x%llx)\n", iterations, pc, lr, sp);
+			lastPC = pc;
+			pcChanges++;
+		}
+		
 		if(pc == pcToWait) {
+			printf("[wait_for_thread] ✓ SUCCESS! Reached target PC after %d iterations\n", iterations);
 			break;
 		}
+		
+		// Timeout check: 5 giây
+		time_t elapsed = time(NULL) - startTime;
+		if (elapsed >= 5) {
+			printf("[wait_for_thread] ✗ TIMEOUT after 5s! Current PC: 0x%llx (expected 0x%llx), %d iterations, %d PC changes\n", 
+				   pc, pcToWait, iterations, pcChanges);
+			// IMPORTANT: Break anyway để không treo vô hạn
+			break;
+		}
+		
+		usleep(10000); // 10ms sleep
 	}
 
 	if(stateOut)
