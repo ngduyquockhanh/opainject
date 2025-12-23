@@ -491,25 +491,49 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	// Lấy base address của libdyld.dylib
-	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	printf("libdyld.dylib base: 0x%llx\n", (unsigned long long)libDyldAddr);
+	// Lấy base address của libobjc.A.dylib
+	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
+	printf("libobjc.A.dylib base: 0x%llx\n", (unsigned long long)libObjcAddr);
 
-	// Resolve địa chỉ hàm dlerror
-	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
-	printf("dlerror address: 0x%llx\n", (unsigned long long)dlerrorAddr);
+	// Resolve địa chỉ hàm objc_copyClassList
+	uint64_t objcCopyClassListAddr = remoteDlSym(task, libObjcAddr, "_objc_copyClassList");
+	printf("objc_copyClassList address: 0x%llx\n", (unsigned long long)objcCopyClassListAddr);
 
-	// Gọi hàm dlerror (không cần tham số)
-	uint64_t errorStrPtr = 0;
-	arbCall(task, pthread, &errorStrPtr, true, dlerrorAddr, 0);
-	printf("[injectDylibViaRop] dlerror returned pointer: 0x%llx\n", errorStrPtr);
 
-	// Nếu trả về pointer hợp lệ, có thể đọc chuỗi lỗi từ process target
-	if (errorStrPtr) {
-		char *errorString = task_copy_string(task, errorStrPtr);
-		printf("[injectDylibViaRop] dlerror string: %s\n", errorString ? errorString : "(null)");
-		if (errorString) free(errorString);
+	size_t remoteCountLen = sizeof(uint32_t);
+	vm_address_t remoteCountPtr = 0;
+	kern_return_t kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) {
+		printf("ERROR: Unable to allocate memory for count\n");
+		return;
 	}
+
+	uint64_t classArrayPtr = 0;
+	arbCall(task, pthread, &classArrayPtr, true, objcCopyClassListAddr, 1, remoteCountPtr);
+	printf("[injectDylibViaRop] objc_copyClassList returned pointer: 0x%llx\n", classArrayPtr);
+
+	uint32_t classCount = 0;
+	vm_size_t outSize = 0;
+	kr = vm_read_overwrite(task, remoteCountPtr, sizeof(classCount), (vm_address_t)&classCount, &outSize);
+	printf("Number of classes: %u\n", classCount);
+
+	for (uint32_t i = 0; i < classCount; i++) {
+		uint64_t classPtr = 0;
+		kr = vm_read_overwrite(task, classArrayPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&classPtr, &outSize);
+		if (kr != KERN_SUCCESS) continue;
+
+		// Gọi ROP để lấy tên class: class_getName
+		uint64_t classGetNameAddr = remoteDlSym(task, libObjcAddr, "_class_getName");
+		uint64_t namePtr = 0;
+		arbCall(task, pthread, &namePtr, true, classGetNameAddr, 1, classPtr);
+
+		if (namePtr) {
+			char *className = task_copy_string(task, namePtr);
+			printf("Class[%u]: %s\n", i, className ? className : "(null)");
+			if (className) free(className);
+		}
+	}
+	vm_deallocate(task, remoteCountPtr, remoteCountLen);
 
 	// FIND OFFSETS
 	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
