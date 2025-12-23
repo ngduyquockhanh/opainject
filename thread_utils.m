@@ -166,12 +166,10 @@ kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm
 		errCount = 0;
 
 		uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(stateToObserve.ts_64);
-		uint64_t lr = stateToObserve.ts_64.__lr;
-		uint64_t sp = stateToObserve.ts_64.__sp;
 		
 		// Log PC changes
 		if (pc != lastPC) {
-			printf("[wait_for_thread] [%d] PC: 0x%llx (LR: 0x%llx, SP: 0x%llx)\n", iterations, pc, lr, sp);
+			printf("[wait_for_thread] [%d] PC: 0x%llx\n", iterations, pc);
 			lastPC = pc;
 			pcChanges++;
 		}
