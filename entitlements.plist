@@ -15,5 +15,9 @@
 	<true/>
 	<key>com.apple.private.thread-set-state</key>
 	<true/>
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<key>com.apple.security.cs.debugger</key>
+	<true/>
 </dict>
 </plist>
