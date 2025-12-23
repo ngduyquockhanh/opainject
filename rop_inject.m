@@ -617,54 +617,71 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 	uint64_t searchedClass = classPtr;
 	printf("[hookM_rop] Starting to search for method %s in class hierarchy of %s...\n", selName, className);
 
+	// FIX: Kiểm tra kỹ lưỡng return value từ class_copyMethodList
+
 	while (searchedClass) {
 		// Get method list
 		uint64_t methodListPtr = 0;
 		uint32_t methodCount = 0;
+		
 		vm_address_t remoteCount = 0;
 		kern_return_t kr = vm_allocate(task, &remoteCount, sizeof(uint32_t), VM_FLAGS_ANYWHERE);
 		if (kr != KERN_SUCCESS) {
 			printf("[hookM_rop] vm_allocate for remoteCount failed: %s\n", mach_error_string(kr));
 			break;
 		}
-		// Truyền remoteCount (địa chỉ remote) vào class_copyMethodList qua arbCall
+		
+		// Khởi tạo giá trị 0 vào remoteCount trước khi gọi
+		uint32_t initCount = 0;
+		kr = vm_write(task, remoteCount, (vm_address_t)&initCount, sizeof(uint32_t));
+		if (kr != KERN_SUCCESS) {
+			printf("[hookM_rop] vm_write initial count failed: %s\n", mach_error_string(kr));
+			vm_deallocate(task, remoteCount, sizeof(uint32_t));
+			break;
+		}
+		
+		// Gọi class_copyMethodList
 		arbCall(task, pthread, &methodListPtr, true, class_copyMethodListAddr, 2, searchedClass, remoteCount);
-		printf("[hookM_rop] class_copyMethodList returned method1 list at 0x%llX for class at 0x%llX\n", methodListPtr, searchedClass);
+		printf("[hookM_rop] class_copyMethodList returned method list at 0x%llX for class at 0x%llX\n", methodListPtr, searchedClass);
+		
 		if (!methodListPtr) {
-			printf("[hookM_rop] methodListPtr is NULL, skipping vm_read_overwrite.\n");
+			printf("[hookM_rop] methodListPtr is NULL, skipping to next class\n");
 			vm_deallocate(task, remoteCount, sizeof(uint32_t));
-			searchedClass = 0;
-			break;
+			
+			// Move to superclass
+			uint64_t superClass = 0;
+			arbCall(task, pthread, &superClass, true, class_getSuperclassAddr, 1, searchedClass);
+			searchedClass = superClass;
+			continue;
 		}
-		if (!remoteCount) {
-			printf("[hookM_rop] remoteCount is NULL, skipping vm_read_overwrite.\n");
-			vm_deallocate(task, remoteCount, sizeof(uint32_t));
-			searchedClass = 0;
-			break;
-		}
-		printf("[hookM_rop] Scanning class at 0x%llX for methods...\n", searchedClass);
-		// Debug: log trước khi đọc methodCount
-		printf("[hookM_rop] About to call vm_read_overwrite(task=0x%llX, remoteCount=0x%llX, sizeof(uint32_t)=%zu)\n", (uint64_t)task, (uint64_t)remoteCount, sizeof(uint32_t));
-		kr = vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, NULL);
-		printf("[hookM_rop] vm_read_overwrite returned kr=%d (%s)\n", kr, mach_error_string(kr));
+		
+		// ✅ FIX: Đọc methodCount từ remoteCount
+		vm_size_t outSize = 0;
+		kr = vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, &outSize);
 		if (kr != KERN_SUCCESS) {
 			printf("[hookM_rop] vm_read_overwrite failed: %s\n", mach_error_string(kr));
 			vm_deallocate(task, remoteCount, sizeof(uint32_t));
 			searchedClass = 0;
 			break;
 		}
+		
 		printf("[hookM_rop] Found %u methods in class at 0x%llX\n", methodCount, searchedClass);
 
 		for (uint32_t i = 0; i < methodCount; i++) {
 			uint64_t methodPtr = 0;
 			vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
+			
+			if (!methodPtr) continue;
+			
 			uint64_t methodSel = 0;
 			arbCall(task, pthread, &methodSel, true, method_getNameAddr, 1, methodPtr);
+			
 			uint64_t isEqual = 0;
-			printf("[hookM_rop] Comparing method %u selector 0x%llX with 0x%llX...\n", i, methodSel, selPtr);
 			arbCall(task, pthread, &isEqual, true, sel_isEqualAddr, 2, methodSel, selPtr);
+			
 			if (isEqual) {
 				printf("[hookM_rop] Found method for selector %s in class at 0x%llX\n", selName, searchedClass);
+				
 				if (searchedClass == classPtr) {
 					// Save old IMP
 					if (oldImpOut) {
@@ -680,11 +697,16 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 					arbCall(task, pthread, &typeEncoding, true, method_getTypeEncodingAddr, 1, methodPtr);
 					arbCall(task, pthread, NULL, true, class_addMethodAddr, 4, classPtr, selPtr, newImpAddr, typeEncoding);
 				}
+				
 				vm_deallocate(task, remoteCount, sizeof(uint32_t));
 				return 1;
 			}
 		}
+		
+		// Free method list nếu cần
+		// (phụ thuộc vào implementation của class_copyMethodList)
 		vm_deallocate(task, remoteCount, sizeof(uint32_t));
+		
 		// Move to superclass
 		uint64_t superClass = 0;
 		arbCall(task, pthread, &superClass, true, class_getSuperclassAddr, 1, searchedClass);
