@@ -1,3 +1,6 @@
+// === SSLKillSwitch ROP Hooks (Full) ===
+#include <mach/mach.h>
+#include <string.h>
 #import <stdio.h>
 #import <unistd.h>
 #import <stdlib.h>
@@ -479,116 +482,161 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 // 	thread_terminate(pthread);
 // }
 
+
 // Helper: Write a stub that returns 0 (errSecSuccess) for OSStatus functions
 vm_address_t writeReturnZeroStub(task_t task) {
-    // ARM64: mov w0, #0; ret
-    uint32_t stub[] = { 0x52800000, 0xd65f03c0 };
-    vm_address_t remoteStub = 0;
-    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS) return 0;
-    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) return 0;
-    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
-    if (kr != KERN_SUCCESS) return 0;
-    return remoteStub;
+	uint32_t stub[] = { 0x52800000, 0xd65f03c0 }; // mov w0, #0; ret
+	vm_address_t remoteStub = 0;
+	kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) return 0;
+	kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+	if (kr != KERN_SUCCESS) return 0;
+	kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+	if (kr != KERN_SUCCESS) return 0;
+	return remoteStub;
 }
 
+// Helper: Write a stub that returns 1 (true/YES)
+vm_address_t writeReturnOneStub(task_t task) {
+	uint32_t stub[] = { 0x52800020, 0xd65f03c0 }; // mov w0, #1; ret
+	vm_address_t remoteStub = 0;
+	kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) return 0;
+	kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+	if (kr != KERN_SUCCESS) return 0;
+	kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+	if (kr != KERN_SUCCESS) return 0;
+	return remoteStub;
+}
+
+// Patch a C function in the target process to always return 0
 void hookCFunctionReturnZero(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* libPath, const char* symName) {
-    vm_address_t libAddr = getRemoteImageAddress(task, allImageInfoAddr, libPath);
-    if (!libAddr) {
-        printf("[-] Could not find %s\n", libPath);
-        return;
-    }
-    uint64_t funcAddr = remoteDlSym(task, libAddr, symName);
-    if (!funcAddr) {
-        printf("[-] Could not find symbol %s\n", symName);
-        return;
-    }
-    vm_address_t stub = writeReturnZeroStub(task);
-    if (!stub) {
-        printf("[-] Could not allocate stub\n");
-        return;
-    }
-    // Overwrite first instruction with branch to stub
-    // ARM64: b <stub>
-    uint32_t branch = 0x14000000 | (((stub - funcAddr) >> 2) & 0x3FFFFFF);
-    vm_write(task, funcAddr, (vm_address_t)&branch, sizeof(branch));
-    printf("[+] Patched %s to always return 0\n", symName);
+	vm_address_t libAddr = getRemoteImageAddress(task, allImageInfoAddr, libPath);
+	if (!libAddr) {
+		printf("[-] Could not find %s\n", libPath);
+		return;
+	}
+	uint64_t funcAddr = remoteDlSym(task, libAddr, symName);
+	if (!funcAddr) {
+		printf("[-] Could not find symbol %s\n", symName);
+		return;
+	}
+	vm_address_t stub = writeReturnZeroStub(task);
+	if (!stub) {
+		printf("[-] Could not allocate stub\n");
+		return;
+	}
+	uint32_t branch = 0x14000000 | (((stub - funcAddr) >> 2) & 0x3FFFFFF);
+	vm_write(task, funcAddr, (vm_address_t)&branch, sizeof(branch));
+	printf("[+] Patched %s to always return 0\n", symName);
 }
 
-// Example usage for SecTrustEvaluate
-void hook_SecTrustEvaluate(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
-    hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluate");
-}
-
-// Example usage for SSLHandshake
-void hook_SSLHandshake(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
-    hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLHandshake");
+// Patch a C function in the target process to always return 1 (true/YES)
+void hookCFunctionReturnOne(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* libPath, const char* symName) {
+	vm_address_t libAddr = getRemoteImageAddress(task, allImageInfoAddr, libPath);
+	if (!libAddr) {
+		printf("[-] Could not find %s\n", libPath);
+		return;
+	}
+	uint64_t funcAddr = remoteDlSym(task, libAddr, symName);
+	if (!funcAddr) {
+		printf("[-] Could not find symbol %s\n", symName);
+		return;
+	}
+	vm_address_t stub = writeReturnOneStub(task);
+	if (!stub) {
+		printf("[-] Could not allocate stub\n");
+		return;
+	}
+	uint32_t branch = 0x14000000 | (((stub - funcAddr) >> 2) & 0x3FFFFFF);
+	vm_write(task, funcAddr, (vm_address_t)&branch, sizeof(branch));
+	printf("[+] Patched %s to always return 1\n", symName);
 }
 
 // Helper: Write a stub for Objective-C methods that disables pinning
 vm_address_t writeObjCBypassStub(task_t task) {
-    // ARM64: ret (does nothing, returns 0/YES)
-    uint32_t stub[] = { 0xd65f03c0 };
-    vm_address_t remoteStub = 0;
-    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS) return 0;
-    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) return 0;
-    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
-    if (kr != KERN_SUCCESS) return 0;
-    return remoteStub;
+	uint32_t stub[] = { 0xd65f03c0 }; // ret
+	vm_address_t remoteStub = 0;
+	kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) return 0;
+	kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+	if (kr != KERN_SUCCESS) return 0;
+	kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+	if (kr != KERN_SUCCESS) return 0;
+	return remoteStub;
 }
 
 // Patch an Objective-C instance method to a stub
 void hookObjCMethodBypass(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* className, const char* selName) {
-    vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
-    uint64_t objc_getClassAddr = remoteDlSym(task, libObjcAddr, "_objc_getClass");
-    uint64_t sel_registerNameAddr = remoteDlSym(task, libObjcAddr, "_sel_registerName");
-    uint64_t class_getInstanceMethodAddr = remoteDlSym(task, libObjcAddr, "_class_getInstanceMethod");
-    uint64_t method_setImplementationAddr = remoteDlSym(task, libObjcAddr, "_method_setImplementation");
+	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
+	uint64_t objc_getClassAddr = remoteDlSym(task, libObjcAddr, "_objc_getClass");
+	uint64_t sel_registerNameAddr = remoteDlSym(task, libObjcAddr, "_sel_registerName");
+	uint64_t class_getInstanceMethodAddr = remoteDlSym(task, libObjcAddr, "_class_getInstanceMethod");
+	uint64_t method_setImplementationAddr = remoteDlSym(task, libObjcAddr, "_method_setImplementation");
 
-    // Write class and selector names into target
-    size_t classLen, selLen;
-    vm_address_t remoteClassName = writeStringToTask(task, className, &classLen);
-    vm_address_t remoteSelName = writeStringToTask(task, selName, &selLen);
+	size_t classLen, selLen;
+	vm_address_t remoteClassName = writeStringToTask(task, className, &classLen);
+	vm_address_t remoteSelName = writeStringToTask(task, selName, &selLen);
 
-    uint64_t classPtr = 0;
-    arbCall(task, pthread, &classPtr, true, objc_getClassAddr, 1, remoteClassName);
-
-    uint64_t selPtr = 0;
-    arbCall(task, pthread, &selPtr, true, sel_registerNameAddr, 1, remoteSelName);
-
-    uint64_t methodPtr = 0;
-    arbCall(task, pthread, &methodPtr, true, class_getInstanceMethodAddr, 2, classPtr, selPtr);
-
-    vm_address_t stub = writeObjCBypassStub(task);
-    if (!stub) {
-        printf("[-] Could not allocate stub for %s %s\n", className, selName);
-        return;
-    }
-
-    // Patch method implementation
-    arbCall(task, pthread, NULL, true, method_setImplementationAddr, 2, methodPtr, stub);
-
-    vm_deallocate(task, remoteClassName, classLen);
-    vm_deallocate(task, remoteSelName, selLen);
-
-    printf("[+] Patched [%s %s] to bypass SSL pinning\n", className, selName);
+	uint64_t classPtr = 0;
+	arbCall(task, pthread, &classPtr, true, objc_getClassAddr, 1, remoteClassName);
+	uint64_t selPtr = 0;
+	arbCall(task, pthread, &selPtr, true, sel_registerNameAddr, 1, remoteSelName);
+	uint64_t methodPtr = 0;
+	arbCall(task, pthread, &methodPtr, true, class_getInstanceMethodAddr, 2, classPtr, selPtr);
+	vm_address_t stub = writeObjCBypassStub(task);
+	if (!stub) {
+		printf("[-] Could not allocate stub for %s %s\n", className, selName);
+		return;
+	}
+	arbCall(task, pthread, NULL, true, method_setImplementationAddr, 2, methodPtr, stub);
+	vm_deallocate(task, remoteClassName, classLen);
+	vm_deallocate(task, remoteSelName, selLen);
+	printf("[+] Patched [%s %s] to bypass SSL pinning\n", className, selName);
 }
 
-// Example usage for AFNetworking
-void hook_AFNetworking(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
-    hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:");
-    hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:");
-}
-
-
+// Patch all known SSL pinning related C functions and Objective-C methods
 void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
-    hook_SecTrustEvaluate(task, pthread, allImageInfoAddr);
-    hook_SSLHandshake(task, pthread, allImageInfoAddr);
-    hook_AFNetworking(task, pthread, allImageInfoAddr);
-    // Add more hooks as needed (TrustKit, CustomURLConnectionDelegate, etc.)
+	// Security.framework
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluate");
+	hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateWithError");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateAsync");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateAsyncWithError");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateFastAsync");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustSetPolicies");
+	hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecKeyVerifySignature");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecKeyRawVerify");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLHandshake");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLSetSessionOption");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLCreateContext");
+
+	// BoringSSL
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_CTX_set_custom_verify");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_set_custom_verify");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_get_psk_identity");
+
+	// libsystem_coretls
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/system/libsystem_coretls.dylib", "tls_helper_create_peer_trust");
+	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libnetwork.dylib", "nw_tls_create_peer_trust");
+
+	// SecIsInternalRelease
+	hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecIsInternalRelease");
+
+	// AFNetworking
+	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:");
+	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:");
+	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:");
+	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:withPinnedCertificates:");
+
+	// TrustKit
+	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "TSKPinningValidator", "evaluateTrust:forHostname:");
+
+	// NSURLSessionDelegate
+	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", "_onqueue_didReceiveChallenge:request:withCompletion:");
+	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:");
+
+	// CustomURLConnectionDelegate
+	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:");
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
