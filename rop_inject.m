@@ -721,7 +721,7 @@ void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t all
 	// hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecIsInternalRelease");
 
 	// // AFNetworking
-	// uint64_t dummyImp = writeObjCBypassStub(task); // stub trả về ret
+	uint64_t dummyImp = writeObjCBypassStub(task); // stub trả về ret
 	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:", dummyImp, NULL);
 	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:", dummyImp, NULL);
 	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:", dummyImp, NULL);
