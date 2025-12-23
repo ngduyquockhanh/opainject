@@ -1,3 +1,6 @@
+// Hook Objective-C method in remote process using ROP, similar to hookM
+// Returns 1 if success, 0 if fail
+
 // === SSLKillSwitch ROP Hooks (Full) ===
 #include <mach/mach.h>
 #include <string.h>
@@ -595,6 +598,101 @@ void hookObjCMethodBypass(task_t task, thread_act_t pthread, vm_address_t allIma
 	printf("[+] Patched [%s %s] to bypass SSL pinning\n", className, selName);
 }
 
+int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* className, const char* selName, uint64_t newImpAddr, uint64_t* oldImpOut) {
+	// Resolve runtime symbols
+	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
+	uint64_t objc_getClassAddr = remoteDlSym(task, libObjcAddr, "_objc_getClass");
+	uint64_t sel_registerNameAddr = remoteDlSym(task, libObjcAddr, "_sel_registerName");
+	uint64_t class_getInstanceMethodAddr = remoteDlSym(task, libObjcAddr, "_class_getInstanceMethod");
+	uint64_t method_getImplementationAddr = remoteDlSym(task, libObjcAddr, "_method_getImplementation");
+	uint64_t method_setImplementationAddr = remoteDlSym(task, libObjcAddr, "_method_setImplementation");
+	uint64_t class_addMethodAddr = remoteDlSym(task, libObjcAddr, "_class_addMethod");
+	uint64_t method_getNameAddr = remoteDlSym(task, libObjcAddr, "_method_getName");
+	uint64_t method_getTypeEncodingAddr = remoteDlSym(task, libObjcAddr, "_method_getTypeEncoding");
+	uint64_t class_copyMethodListAddr = remoteDlSym(task, libObjcAddr, "_class_copyMethodList");
+	uint64_t sel_isEqualAddr = remoteDlSym(task, libObjcAddr, "_sel_isEqual");
+	uint64_t class_getSuperclassAddr = remoteDlSym(task, libObjcAddr, "_class_getSuperclass");
+
+	if (!objc_getClassAddr || !sel_registerNameAddr || !class_getInstanceMethodAddr || !method_getImplementationAddr || !method_setImplementationAddr || !class_addMethodAddr || !method_getNameAddr || !method_getTypeEncodingAddr || !class_copyMethodListAddr || !sel_isEqualAddr || !class_getSuperclassAddr) {
+		printf("[hookM_rop] Failed to resolve one or more objc runtime symbols!\n");
+		return 0;
+	}
+
+	// Write class and selector names into target
+	size_t classLen, selLen;
+	vm_address_t remoteClassName = writeStringToTask(task, className, &classLen);
+	vm_address_t remoteSelName = writeStringToTask(task, selName, &selLen);
+
+	// Get class pointer
+	uint64_t classPtr = 0;
+	arbCall(task, pthread, &classPtr, true, objc_getClassAddr, 1, remoteClassName);
+	if (!classPtr) {
+		printf("[hookM_rop] objc_getClass failed for %s\n", className);
+		goto cleanup;
+	}
+
+	// Get selector pointer
+	uint64_t selPtr = 0;
+	arbCall(task, pthread, &selPtr, true, sel_registerNameAddr, 1, remoteSelName);
+	if (!selPtr) {
+		printf("[hookM_rop] sel_registerName failed for %s\n", selName);
+		goto cleanup;
+	}
+
+	// Walk class hierarchy
+	uint64_t searchedClass = classPtr;
+	while (searchedClass) {
+		// Get method list
+		uint64_t methodListPtr = 0;
+		uint32_t methodCount = 0;
+		vm_address_t remoteCount = 0;
+		vm_allocate(task, &remoteCount, sizeof(uint32_t), VM_FLAGS_ANYWHERE);
+		arbCall(task, pthread, &methodListPtr, true, class_copyMethodListAddr, 2, searchedClass, remoteCount);
+		if (!methodListPtr) {
+			vm_deallocate(task, remoteCount, sizeof(uint32_t));
+			searchedClass = 0;
+			break;
+		}
+		vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, NULL);
+		for (uint32_t i = 0; i < methodCount; i++) {
+			uint64_t methodPtr = 0;
+			vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
+			uint64_t methodSel = 0;
+			arbCall(task, pthread, &methodSel, true, method_getNameAddr, 1, methodPtr);
+			int isEqual = 0;
+			arbCall(task, pthread, &isEqual, true, sel_isEqualAddr, 2, methodSel, selPtr);
+			if (isEqual) {
+				if (searchedClass == classPtr) {
+					// Save old IMP
+					if (oldImpOut) {
+						arbCall(task, pthread, oldImpOut, true, method_getImplementationAddr, 1, methodPtr);
+					}
+					// Set new IMP
+					uint64_t oldImpTmp = 0;
+					arbCall(task, pthread, &oldImpTmp, true, method_setImplementationAddr, 2, methodPtr, newImpAddr);
+					if (oldImpOut) *oldImpOut = oldImpTmp;
+				} else {
+					// Add method to subclass
+					uint64_t typeEncoding = 0;
+					arbCall(task, pthread, &typeEncoding, true, method_getTypeEncodingAddr, 1, methodPtr);
+					arbCall(task, pthread, NULL, true, class_addMethodAddr, 4, classPtr, selPtr, newImpAddr, typeEncoding);
+				}
+				vm_deallocate(task, remoteCount, sizeof(uint32_t));
+				return 1;
+			}
+		}
+		vm_deallocate(task, remoteCount, sizeof(uint32_t));
+		// Move to superclass
+		uint64_t superClass = 0;
+		arbCall(task, pthread, &superClass, true, class_getSuperclassAddr, 1, searchedClass);
+		searchedClass = superClass;
+	}
+cleanup:
+	vm_deallocate(task, remoteClassName, classLen);
+	vm_deallocate(task, remoteSelName, selLen);
+	return 0;
+}
+
 // Patch all known SSL pinning related C functions and Objective-C methods
 void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
 	// Security.framework
@@ -623,20 +721,21 @@ void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t all
 	hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecIsInternalRelease");
 
 	// AFNetworking
-	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:");
-	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:");
-	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:");
-	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:withPinnedCertificates:");
+	uint64_t dummyImp = writeObjCBypassStub(task); // stub trả về ret
+	hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:", dummyImp, NULL);
+	hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:", dummyImp, NULL);
+	hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:", dummyImp, NULL);
+	hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:withPinnedCertificates:", dummyImp, NULL);
 
 	// TrustKit
-	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "TSKPinningValidator", "evaluateTrust:forHostname:");
+	hookM_rop(task, pthread, allImageInfoAddr, "TSKPinningValidator", "evaluateTrust:forHostname:", dummyImp, NULL);
 
-	// // NSURLSessionDelegate
-	// hookObjCMethodBypass(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", "_onqueue_didReceiveChallenge:request:withCompletion:");
-	// hookObjCMethodBypass(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:");
+	// NSURLSessionDelegate
+	// hookM_rop(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", "_onqueue_didReceiveChallenge:request:withCompletion:", dummyImp, NULL);
+	// hookM_rop(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:", dummyImp, NULL);
 
 	// // CustomURLConnectionDelegate
-	// hookObjCMethodBypass(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:");
+	// hookM_rop(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:", dummyImp, NULL);
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
