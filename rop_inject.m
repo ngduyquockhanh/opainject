@@ -697,7 +697,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 					if (oldImpOut) *oldImpOut = oldImpTmp;
 					printf("[hookM_rop] IMP replaced successfully in original class\n");
 				} else {
-					printf("[hookM_rop] Method not found in original class, adding to subclass at 0x%llX\n", searchedClass);
+					printf("[hookM_rop] Method1 not found in original class, adding to subclass at 0x%llX\n", searchedClass);
 					// Add method to subclass
 					uint64_t typeEncoding = 0;
 					arbCall(task, pthread, &typeEncoding, true, method_getTypeEncodingAddr, 1, methodPtr);
