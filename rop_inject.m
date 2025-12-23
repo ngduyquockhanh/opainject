@@ -447,13 +447,18 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 		if (dlopenRet) {
 			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
-			
-			uint64_t myFuncAddr = remoteDlSym(task, (uint64_t)dlopenRet, "my_entrypoint");
-			if (myFuncAddr) {
-				arbCall(task, pthread, NULL, false, myFuncAddr, 0);
-				printf("[injectDylibViaRop] Called my_entrypoint!\n");
+
+			vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
+			if (myDylibBase) {
+				uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "my_entrypoint");
+				if (myFuncAddr) {
+					arbCall(task, pthread, NULL, false, myFuncAddr, 0);
+					printf("[injectDylibViaRop] Called my_entrypoint!\n");
+				} else {
+					printf("[injectDylibViaRop] Could not find my_entrypoint symbol.\n");
+				}
 			} else {
-				printf("[injectDylibViaRop] Could not find my_entrypoint symbol.\n");
+				printf("[injectDylibViaRop] Could not find base address of injected dylib.\n");
 			}
 		}
 		else {
