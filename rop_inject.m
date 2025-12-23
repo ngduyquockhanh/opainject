@@ -696,46 +696,46 @@ cleanup:
 // Patch all known SSL pinning related C functions and Objective-C methods
 void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
 	// Security.framework
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluate");
-	hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateWithError");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateAsync");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateAsyncWithError");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateFastAsync");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustSetPolicies");
-	hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecKeyVerifySignature");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecKeyRawVerify");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLHandshake");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLSetSessionOption");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLCreateContext");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluate");
+	// hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateWithError");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateAsync");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateAsyncWithError");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustEvaluateFastAsync");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecTrustSetPolicies");
+	// hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecKeyVerifySignature");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecKeyRawVerify");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLHandshake");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLSetSessionOption");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SSLCreateContext");
 
-	// BoringSSL
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_CTX_set_custom_verify");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_set_custom_verify");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_get_psk_identity");
+	// // BoringSSL
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_CTX_set_custom_verify");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_set_custom_verify");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libboringssl.dylib", "SSL_get_psk_identity");
 
-	// libsystem_coretls
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/system/libsystem_coretls.dylib", "tls_helper_create_peer_trust");
-	hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libnetwork.dylib", "nw_tls_create_peer_trust");
+	// // libsystem_coretls
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/system/libsystem_coretls.dylib", "tls_helper_create_peer_trust");
+	// hookCFunctionReturnZero(task, pthread, allImageInfoAddr, "/usr/lib/libnetwork.dylib", "nw_tls_create_peer_trust");
 
-	// SecIsInternalRelease
-	hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecIsInternalRelease");
+	// // SecIsInternalRelease
+	// hookCFunctionReturnOne(task, pthread, allImageInfoAddr, "/System/Library/Frameworks/Security.framework/Security", "_SecIsInternalRelease");
 
-	// AFNetworking
-	uint64_t dummyImp = writeObjCBypassStub(task); // stub trả về ret
-	hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:", dummyImp, NULL);
-	hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:", dummyImp, NULL);
-	hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:", dummyImp, NULL);
-	hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:withPinnedCertificates:", dummyImp, NULL);
+	// // AFNetworking
+	// uint64_t dummyImp = writeObjCBypassStub(task); // stub trả về ret
+	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setSSLPinningMode:", dummyImp, NULL);
+	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "setAllowInvalidCertificates:", dummyImp, NULL);
+	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:", dummyImp, NULL);
+	// hookM_rop(task, pthread, allImageInfoAddr, "AFSecurityPolicy", "policyWithPinningMode:withPinnedCertificates:", dummyImp, NULL);
 
-	// TrustKit
-	hookM_rop(task, pthread, allImageInfoAddr, "TSKPinningValidator", "evaluateTrust:forHostname:", dummyImp, NULL);
+	// // TrustKit
+	// hookM_rop(task, pthread, allImageInfoAddr, "TSKPinningValidator", "evaluateTrust:forHostname:", dummyImp, NULL);
 
 	// NSURLSessionDelegate
-	// hookM_rop(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", "_onqueue_didReceiveChallenge:request:withCompletion:", dummyImp, NULL);
-	// hookM_rop(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:", dummyImp, NULL);
+	hookM_rop(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", "_onqueue_didReceiveChallenge:request:withCompletion:", dummyImp, NULL);
+	hookM_rop(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:", dummyImp, NULL);
 
-	// // CustomURLConnectionDelegate
-	// hookM_rop(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:", dummyImp, NULL);
+	// CustomURLConnectionDelegate
+	hookM_rop(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:", dummyImp, NULL);
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
