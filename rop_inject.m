@@ -569,34 +569,6 @@ vm_address_t writeObjCBypassStub(task_t task) {
 	return remoteStub;
 }
 
-// Patch an Objective-C instance method to a stub
-void hookObjCMethodBypass(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* className, const char* selName) {
-	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
-	uint64_t objc_getClassAddr = remoteDlSym(task, libObjcAddr, "_objc_getClass");
-	uint64_t sel_registerNameAddr = remoteDlSym(task, libObjcAddr, "_sel_registerName");
-	uint64_t class_getInstanceMethodAddr = remoteDlSym(task, libObjcAddr, "_class_getInstanceMethod");
-	uint64_t method_setImplementationAddr = remoteDlSym(task, libObjcAddr, "_method_setImplementation");
-
-	size_t classLen, selLen;
-	vm_address_t remoteClassName = writeStringToTask(task, className, &classLen);
-	vm_address_t remoteSelName = writeStringToTask(task, selName, &selLen);
-
-	uint64_t classPtr = 0;
-	arbCall(task, pthread, &classPtr, true, objc_getClassAddr, 1, remoteClassName);
-	uint64_t selPtr = 0;
-	arbCall(task, pthread, &selPtr, true, sel_registerNameAddr, 1, remoteSelName);
-	uint64_t methodPtr = 0;
-	arbCall(task, pthread, &methodPtr, true, class_getInstanceMethodAddr, 2, classPtr, selPtr);
-	vm_address_t stub = writeObjCBypassStub(task);
-	if (!stub) {
-		printf("[-] Could not allocate stub for %s %s\n", className, selName);
-		return;
-	}
-	arbCall(task, pthread, NULL, true, method_setImplementationAddr, 2, methodPtr, stub);
-	vm_deallocate(task, remoteClassName, classLen);
-	vm_deallocate(task, remoteSelName, selLen);
-	printf("[+] Patched [%s %s] to bypass SSL pinning\n", className, selName);
-}
 
 int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* className, const char* selName, uint64_t newImpAddr, uint64_t* oldImpOut) {
 	// Resolve runtime symbols
@@ -630,6 +602,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		printf("[hookM_rop] objc_getClass failed for %s\n", className);
 		goto cleanup;
 	}
+	printf("[hookM_rop] class %s found at 0x%llX\n", className, classPtr);
 
 	// Get selector pointer
 	uint64_t selPtr = 0;
@@ -638,6 +611,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		printf("[hookM_rop] sel_registerName failed for %s\n", selName);
 		goto cleanup;
 	}
+	printf("[hookM_rop] selector %s found at 0x%llX\n", selName, selPtr);
 
 	// Walk class hierarchy
 	uint64_t searchedClass = classPtr;
@@ -653,6 +627,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 			searchedClass = 0;
 			break;
 		}
+		printf("[hookM_rop] Scanning class at 0x%llX for methods...\n", searchedClass);
 		vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, NULL);
 		for (uint32_t i = 0; i < methodCount; i++) {
 			uint64_t methodPtr = 0;
@@ -662,6 +637,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 			uint64_t isEqual = 0;
 			arbCall(task, pthread, &isEqual, true, sel_isEqualAddr, 2, methodSel, selPtr);
 			if (isEqual) {
+				printf("[hookM_rop] Found method for selector %s in class at 0x%llX\n", selName, searchedClass);
 				if (searchedClass == classPtr) {
 					// Save old IMP
 					if (oldImpOut) {
