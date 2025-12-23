@@ -629,6 +629,8 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		}
 		printf("[hookM_rop] Scanning class at 0x%llX for methods...\n", searchedClass);
 		vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, NULL);
+		printf("[hookM_rop] Found %u methods in class at 0x%llX\n", methodCount, searchedClass);
+		
 		for (uint32_t i = 0; i < methodCount; i++) {
 			uint64_t methodPtr = 0;
 			vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
