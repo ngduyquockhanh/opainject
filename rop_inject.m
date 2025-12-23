@@ -56,6 +56,57 @@ void verifyRopLoop(task_t task, uint64_t ropLoopAddr) {
     }
 }
 
+kern_return_t wait_for_thread_timeout(thread_act_t thread, uint64_t targetPC, 
+                                      struct arm_unified_thread_state* outState, 
+                                      int timeoutSec) {
+    printf("[wait_for_thread_timeout] Waiting for thread to reach PC=0x%llx (timeout: %ds)...\n", targetPC, timeoutSec);
+    
+    time_t startTime = time(NULL);
+    uint64_t lastPC = 0;
+    int pcChangeCount = 0;
+    
+    for (int i = 0; i < timeoutSec * 10; i++) {
+        mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+        kern_return_t kr = thread_get_state(thread, ARM_THREAD_STATE64, 
+                                           (thread_state_t)&outState->ts_64, &count);
+        if (kr != KERN_SUCCESS) {
+            printf("[wait_for_thread_timeout] ERROR: Failed to get thread state: %s\n", mach_error_string(kr));
+            return kr;
+        }
+        
+        uint64_t pc = __darwin_arm_thread_state64_get_pc(outState->ts_64);
+        uint64_t lr = outState->ts_64.__lr;
+        uint64_t sp = outState->ts_64.__sp;
+        
+        // Log PC change
+        if (pc != lastPC) {
+            printf("[wait_for_thread_timeout] PC: 0x%llx, LR: 0x%llx, SP: 0x%llx\n", pc, lr, sp);
+            lastPC = pc;
+            pcChangeCount++;
+        }
+        
+        if (targetPC == 0) {
+            usleep(100000); // 100ms
+            continue;
+        }
+        
+        if (pc == targetPC) {
+            printf("[wait_for_thread_timeout] ✓ Thread reached target PC! (PC changed %d times)\n", pcChangeCount);
+            return KERN_SUCCESS;
+        }
+        
+        time_t elapsed = time(NULL) - startTime;
+        if (elapsed >= timeoutSec) {
+            printf("[wait_for_thread_timeout] ✗ TIMEOUT! Last PC: 0x%llx (expected 0x%llx), PC changed %d times\n", pc, targetPC, pcChangeCount);
+            return KERN_OPERATION_TIMED_OUT;
+        }
+        
+        usleep(100000); // 100ms
+    }
+    
+    return KERN_OPERATION_TIMED_OUT;
+}
+
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
 {
 	kern_return_t kr = KERN_SUCCESS;
@@ -328,27 +379,42 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 
 	// wait for arbitary call to finish (or not)
 	struct arm_unified_thread_state outState;
-	if (willReturn)
-	{
-		kr = wait_for_thread(targetThread, ropLoop, &outState);
-		if(kr != KERN_SUCCESS)
-		{
-			free(origThreadFullState);
-			printf("[arbCall] ERROR: failed to wait for thread to finish: %s\n", mach_error_string(kr));
-			return kr;
-		}
+	// if (willReturn)
+	// {
+	// 	kr = wait_for_thread(targetThread, ropLoop, &outState);
+	// 	if(kr != KERN_SUCCESS)
+	// 	{
+	// 		free(origThreadFullState);
+	// 		printf("[arbCall] ERROR: failed to wait for thread to finish: %s\n", mach_error_string(kr));
+	// 		return kr;
+	// 	}
 
-		// extract return value from state if needed
-		if(retOut)
-		{
-			*retOut = outState.ts_64.__x[0];
-		}
-	}
-	else
-	{
-		kr = wait_for_thread(targetThread, 0, &outState);
-		printf("[arbCall] pthread successfully did not return with code %d (%s)\n", kr, mach_error_string(kr));
-	}
+	// 	// extract return value from state if needed
+	// 	if(retOut)
+	// 	{
+	// 		*retOut = outState.ts_64.__x[0];
+	// 	}
+	// }
+	// else
+	// {
+	// 	kr = wait_for_thread(targetThread, 0, &outState);
+	// 	printf("[arbCall] pthread successfully did not return with code %d (%s)\n", kr, mach_error_string(kr));
+	// }
+	if (willReturn)
+    {
+        kr = wait_for_thread_timeout(targetThread, ropLoop, &outState, 5);
+        if(kr != KERN_SUCCESS)
+        {
+            printf("[arbCall] ⚠️  Wait timeout or failed! Forcing state restore...\n");
+            // Force continue even if timeout
+        }
+
+        // extract return value from state if needed
+        if(retOut)
+        {
+            *retOut = outState.ts_64.__x[0];
+        }
+    }
 
 	resume_threads_except_for(cachedThreads, cachedThreadCount, targetThread);
 
@@ -376,6 +442,7 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 		thread_resume(targetThread);
 	}
 
+	free(origThreadFullState);
 	return kr;
 }
 
