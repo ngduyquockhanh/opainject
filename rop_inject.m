@@ -615,6 +615,8 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 
 	// Walk class hierarchy
 	uint64_t searchedClass = classPtr;
+	printf("[hookM_rop] Starting to search for method %s in class hierarchy of %s...\n", selName, className);
+	
 	while (searchedClass) {
 		// Get method list
 		uint64_t methodListPtr = 0;
