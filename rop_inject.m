@@ -31,31 +31,6 @@
 #import "thread_utils.h"
 #import "arm64.h"
 
-void verifyRopLoop(task_t task, uint64_t ropLoopAddr) {
-    if (!ropLoopAddr) {
-        printf("[verifyRopLoop] ERROR: ropLoop is NULL\n");
-        return;
-    }
-    
-    uint32_t inst = 0;
-    kern_return_t kr = task_read(task, ropLoopAddr, &inst, sizeof(inst));
-    
-    if (kr != KERN_SUCCESS) {
-        printf("[verifyRopLoop] ERROR: Failed to read instruction at 0x%llx: %s\n", ropLoopAddr, mach_error_string(kr));
-        return;
-    }
-    
-    printf("[verifyRopLoop] Instruction at 0x%llx: 0x%08x\n", ropLoopAddr, inst);
-    
-    // Check if it's actually B #0 (0x14000000)
-    if (inst == 0x14000000) {
-        printf("[verifyRopLoop] ✓ Valid infinite loop instruction (B #0)\n");
-    } else {
-        printf("[verifyRopLoop] ✗ WARNING: Not B #0 instruction!\n");
-        printf("[verifyRopLoop] Instruction 0x%08x might not work as infinite loop\n", inst);
-    }
-}
-
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
 {
@@ -385,12 +360,7 @@ void prepareForMagic(task_t task, vm_address_t allImageInfoAddr)
 	// FIND INFINITE LOOP ROP GADGET
 	static dispatch_once_t onceToken;
 	dispatch_once (&onceToken, ^{
-		printf("[prepareForMagic] Looking for ROP loop...\n");
-        findRopLoop(task, allImageInfoAddr);
-        printf("[prepareForMagic] Found ropLoop at: 0x%llX\n", ropLoop);
-        
-        // Debug: verify ropLoop
-        verifyRopLoop(task, ropLoop);
+		findRopLoop(task, allImageInfoAddr);
 	});
 	printf("[prepareForMagic] done, ropLoop: 0x%llX\n", ropLoop);
 }
