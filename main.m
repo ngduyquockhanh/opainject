@@ -149,7 +149,7 @@ int main(int argc, char *argv[], char *envp[]) {
 		uint32_t count = TASK_DYLD_INFO_COUNT;
 		task_info(procTask, TASK_DYLD_INFO, (task_info_t)&dyldInfo, &count);
 
-		injectDylibViaRop(procTask, targetPid, dylibPath, dyldInfo.all_image_info_addr);
+		// injectDylibViaRop(procTask, targetPid, dylibPath, dyldInfo.all_image_info_addr);
 		injectDylibViaShellcode(procTask, targetPid, dylibPath, dyldInfo.all_image_info_addr);
 
 		mach_port_deallocate(mach_task_self(), procTask);
