@@ -594,11 +594,10 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 	uint64_t class_addMethodAddr = remoteDlSym(task, libObjcAddr, "_class_addMethod");
 	uint64_t method_getNameAddr = remoteDlSym(task, libObjcAddr, "_method_getName");
 	uint64_t method_getTypeEncodingAddr = remoteDlSym(task, libObjcAddr, "_method_getTypeEncoding");
-	uint64_t class_copyMethodListAddr = remoteDlSym(task, libObjcAddr, "_class_copyMethodList");
 	uint64_t sel_isEqualAddr = remoteDlSym(task, libObjcAddr, "_sel_isEqual");
 	uint64_t class_getSuperclassAddr = remoteDlSym(task, libObjcAddr, "_class_getSuperclass");
 
-	if (!objc_getClassAddr || !sel_registerNameAddr || !class_getInstanceMethodAddr || !method_getImplementationAddr || !method_setImplementationAddr || !class_addMethodAddr || !method_getNameAddr || !method_getTypeEncodingAddr || !class_copyMethodListAddr || !sel_isEqualAddr || !class_getSuperclassAddr) {
+	if (!objc_getClassAddr || !sel_registerNameAddr || !class_getInstanceMethodAddr || !method_getImplementationAddr || !method_setImplementationAddr || !class_addMethodAddr || !method_getNameAddr || !method_getTypeEncodingAddr || !sel_isEqualAddr || !class_getSuperclassAddr) {
 		printf("[hookM_rop] Failed to resolve one or more objc runtime symbols!\n");
 		return 0;
 	}
@@ -626,130 +625,92 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 	}
 	printf("[hookM_rop] selector %s found at 0x%llX\n", selName, selPtr);
 
-	// Walk class hierarchy
+	// Walk class hierarchy to find the method
 	uint64_t searchedClass = classPtr;
 	printf("[hookM_rop] Starting to search for method %s in class hierarchy of %s...\n", selName, className);
 
 	while (searchedClass) {
-		// Get method list
-		uint64_t methodListPtr = 0;
-		uint32_t methodCount = 0;
+		printf("[hookM_rop] Searching in class at 0x%llX\n", searchedClass);
 		
-		vm_address_t remoteCount = 0;
-		kern_return_t kr = vm_allocate(task, &remoteCount, sizeof(uint32_t), VM_FLAGS_ANYWHERE);
-		if (kr != KERN_SUCCESS) {
-			printf("[hookM_rop] vm_allocate for remoteCount failed: %s\n", mach_error_string(kr));
-			break;
-		}
+		// Try to get the method from this class
+		uint64_t methodPtr = 0;
+		arbCall(task, pthread, &methodPtr, true, class_getInstanceMethodAddr, 2, searchedClass, selPtr);
 		
-		// Khởi tạo giá trị 0
-		uint32_t initCount = 0;
-		kr = vm_write(task, remoteCount, (vm_address_t)&initCount, sizeof(uint32_t));
-		if (kr != KERN_SUCCESS) {
-			printf("[hookM_rop] vm_write initial count failed: %s\n", mach_error_string(kr));
-			vm_deallocate(task, remoteCount, sizeof(uint32_t));
-			break;
-		}
-		
-		// Gọi class_copyMethodList
-		arbCall(task, pthread, &methodListPtr, true, class_copyMethodListAddr, 2, searchedClass, remoteCount);
-		printf("[hookM_rop] class_copyMethodList returned method list at 0x%llX for class at 0x%llX\n", methodListPtr, searchedClass);
-		
-		if (!methodListPtr) {
-			printf("[hookM_rop] methodListPtr is NULL, moving to superclass\n");
-			vm_deallocate(task, remoteCount, sizeof(uint32_t));
+		if (methodPtr) {
+			printf("[hookM_rop] Found method at 0x%llX\n", methodPtr);
 			
-			// Move to superclass
-			uint64_t superClass = 0;
-			arbCall(task, pthread, &superClass, true, class_getSuperclassAddr, 1, searchedClass);
-			searchedClass = superClass;
-			continue;
-		}
-		
-		// ✅ FIX: Đọc method_list_t header từ methodListPtr
-		method_list_t methodListHeader;
-		vm_size_t outSize = 0;
-		kr = vm_read_overwrite(task, methodListPtr, sizeof(method_list_t), (vm_address_t)&methodListHeader, &outSize);
-		if (kr != KERN_SUCCESS) {
-			printf("[hookM_rop] Failed to read method list header: %s\n", mach_error_string(kr));
-			vm_deallocate(task, remoteCount, sizeof(uint32_t));
-			break;
-		}
-		
-		methodCount = methodListHeader.count;
-		uint32_t entsize = (methodListHeader.entsize_and_flags & 0xFFFFFF);
-		
-		printf("[hookM_rop] Found %u methods in class at 0x%llX (entsize=%u)\n", methodCount, searchedClass, entsize);
-
-		// Iterate through methods
-		for (uint32_t i = 0; i < methodCount; i++) {
-			// Tính offset của method trong method list
-			// Methods bắt đầu sau header (8 bytes)
-			uint64_t methodEntryAddr = methodListPtr + sizeof(method_list_t) + (i * entsize);
+			// Verify it's the right method by comparing selector
+			uint64_t foundSel = 0;
+			arbCall(task, pthread, &foundSel, true, method_getNameAddr, 1, methodPtr);
 			
-			// Đọc method entry (chứa name, types, imp)
-			method_t methodEntry;
-			kr = vm_read_overwrite(task, methodEntryAddr, sizeof(method_t), (vm_address_t)&methodEntry, NULL);
-			if (kr != KERN_SUCCESS) {
-				printf("[hookM_rop] Failed to read method entry %u: %s\n", i, mach_error_string(kr));
-				continue;
-			}
-			
-			if (!methodEntry.name) {
-				printf("[hookM_rop] Method %u has NULL name, skipping\n", i);
-				continue;
-			}
-			
-			// So sánh selector
 			uint64_t isEqual = 0;
-			arbCall(task, pthread, &isEqual, true, sel_isEqualAddr, 2, methodEntry.name, selPtr);
+			arbCall(task, pthread, &isEqual, true, sel_isEqualAddr, 2, foundSel, selPtr);
 			
 			if (isEqual) {
-				printf("[hookM_rop] Found matching method %u for selector %s\n", i, selName);
-				printf("[hookM_rop] Method entry address: 0x%llX\n", methodEntryAddr);
-				printf("[hookM_rop] Current IMP: 0x%llX\n", methodEntry.imp);
-				printf("[hookM_rop] New IMP: 0x%llX\n", newImpAddr);
+				printf("[hookM_rop] Confirmed: Found matching method for selector %s\n", selName);
+				
+				// Check if method belongs to the original class or a superclass
+				uint64_t methodClass = 0;
+				// We need to figure out which class this method belongs to
+				// For now, assume it's in searchedClass if we found it here
 				
 				if (searchedClass == classPtr) {
-					// Save old IMP
+					// Method is in the original class - replace it
+					printf("[hookM_rop] Method found in original class, replacing IMP\n");
+					
+					// Get old implementation
+					uint64_t oldImp = 0;
+					arbCall(task, pthread, &oldImp, true, method_getImplementationAddr, 1, methodPtr);
+					printf("[hookM_rop] Old IMP: 0x%llX\n", oldImp);
+					
 					if (oldImpOut) {
-						*oldImpOut = methodEntry.imp;
+						*oldImpOut = oldImp;
 					}
 					
-					// Update IMP directly in memory
-					kr = vm_write(task, methodEntryAddr + offsetof(method_t, imp), (vm_address_t)&newImpAddr, sizeof(uint64_t));
-					if (kr != KERN_SUCCESS) {
-						printf("[hookM_rop] Failed to write new IMP: %s\n", mach_error_string(kr));
-					} else {
-						printf("[hookM_rop] IMP replaced successfully\n");
-						vm_deallocate(task, remoteCount, sizeof(uint32_t));
-						goto cleanup;
-					}
+					// Set new implementation
+					uint64_t setResult = 0;
+					arbCall(task, pthread, &setResult, true, method_setImplementationAddr, 2, methodPtr, newImpAddr);
+					printf("[hookM_rop] method_setImplementation returned: 0x%llX\n", setResult);
+					printf("[hookM_rop] Successfully replaced IMP\n");
+					
+					goto cleanup;
 				} else {
-					printf("[hookM_rop] Method found in superclass, adding to target class\n");
-					// Add method to original class
-					arbCall(task, pthread, NULL, true, class_addMethodAddr, 4, classPtr, selPtr, newImpAddr, methodEntry.types);
-					vm_deallocate(task, remoteCount, sizeof(uint32_t));
+					// Method is in superclass - add override to original class
+					printf("[hookM_rop] Method found in superclass at 0x%llX, adding override to original class\n", searchedClass);
+					
+					uint64_t typeEncoding = 0;
+					arbCall(task, pthread, &typeEncoding, true, method_getTypeEncodingAddr, 1, methodPtr);
+					printf("[hookM_rop] Method type encoding: 0x%llX\n", typeEncoding);
+					
+					uint64_t addResult = 0;
+					arbCall(task, pthread, &addResult, true, class_addMethodAddr, 4, classPtr, selPtr, newImpAddr, typeEncoding);
+					printf("[hookM_rop] class_addMethod returned: 0x%llX\n", addResult);
+					printf("[hookM_rop] Successfully added method override\n");
+					
 					goto cleanup;
 				}
 			}
 		}
 		
-		printf("[hookM_rop] Method not found in class at 0x%llX, checking superclass\n", searchedClass);
-		vm_deallocate(task, remoteCount, sizeof(uint32_t));
-		
 		// Move to superclass
 		uint64_t superClass = 0;
 		arbCall(task, pthread, &superClass, true, class_getSuperclassAddr, 1, searchedClass);
+		
+		if (superClass == 0) {
+			printf("[hookM_rop] Reached NSObject, method not found\n");
+			break;
+		}
+		
+		printf("[hookM_rop] Moving to superclass at 0x%llX\n", superClass);
 		searchedClass = superClass;
 	}
 	
-	printf("[hookM_rop] Method %s not found in class hierarchy\n", selName);
-	
+	printf("[hookM_rop] Method %s not found in class hierarchy of %s\n", selName, className);
+
 cleanup:
-	vm_deallocate(task, remoteClassName, classLen);
-	vm_deallocate(task, remoteSelName, selLen);
-	return 0;
+	if (remoteClassName) vm_deallocate(task, remoteClassName, classLen);
+	if (remoteSelName) vm_deallocate(task, remoteSelName, selLen);
+	return 1;
 }
 
 // Patch all known SSL pinning related C functions and Objective-C methods
