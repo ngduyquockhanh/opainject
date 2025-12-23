@@ -646,9 +646,20 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		}
 		printf("[hookM_rop] Found %u methods in class at 0x%llX\n", methodCount, searchedClass);
 
+		// Bảo vệ: nếu methodCount quá lớn, dừng lại để tránh crash
+		if (methodCount > 1000) {
+			printf("[hookM_rop] WARNING: methodCount quá lớn (%u), bỏ qua để tránh crash!\n", methodCount);
+			vm_deallocate(task, remoteCount, sizeof(uint32_t));
+			break;
+		}
+
 		for (uint32_t i = 0; i < methodCount; i++) {
 			uint64_t methodPtr = 0;
-			vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
+			kern_return_t kr_read = vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
+			if (kr_read != KERN_SUCCESS) {
+				printf("[hookM_rop] vm_read_overwrite methodPtr lỗi tại i=%u: %s\n", i, mach_error_string(kr_read));
+				break;
+			}
 			uint64_t methodSel = 0;
 			arbCall(task, pthread, &methodSel, true, method_getNameAddr, 1, methodPtr);
 			uint64_t isEqual = 0;
