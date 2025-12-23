@@ -631,12 +631,12 @@ void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t all
 	// TrustKit
 	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "TSKPinningValidator", "evaluateTrust:forHostname:");
 
-	// NSURLSessionDelegate
-	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", "_onqueue_didReceiveChallenge:request:withCompletion:");
-	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:");
+	// // NSURLSessionDelegate
+	// hookObjCMethodBypass(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", "_onqueue_didReceiveChallenge:request:withCompletion:");
+	// hookObjCMethodBypass(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", "_onqueue_sendSessionChallenge:completionHandler:");
 
-	// CustomURLConnectionDelegate
-	hookObjCMethodBypass(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:");
+	// // CustomURLConnectionDelegate
+	// hookObjCMethodBypass(task, pthread, allImageInfoAddr, "CustomURLConnectionDelegate", "isFingerprintTrusted:");
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
