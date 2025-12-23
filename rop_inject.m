@@ -622,6 +622,9 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		vm_address_t remoteCount = 0;
 		vm_allocate(task, &remoteCount, sizeof(uint32_t), VM_FLAGS_ANYWHERE);
 		arbCall(task, pthread, &methodListPtr, true, class_copyMethodListAddr, 2, searchedClass, remoteCount);
+		printf("[hookM_rop] class_copyMethodList returned method list at 0x%llX for class at 0x%llX\n", methodListPtr, searchedClass);
+		printf("[hookM_rop] remoteCount address: 0x%llX\n", remoteCount);
+		printf("[hookM_rop] remoteCount value: 0x%X\n", methodCount);
 		if (!methodListPtr) {
 			vm_deallocate(task, remoteCount, sizeof(uint32_t));
 			searchedClass = 0;
@@ -630,7 +633,7 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 		printf("[hookM_rop] Scanning class at 0x%llX for methods...\n", searchedClass);
 		vm_read_overwrite(task, remoteCount, sizeof(uint32_t), (vm_address_t)&methodCount, NULL);
 		printf("[hookM_rop] Found %u methods in class at 0x%llX\n", methodCount, searchedClass);
-		
+
 		for (uint32_t i = 0; i < methodCount; i++) {
 			uint64_t methodPtr = 0;
 			vm_read_overwrite(task, methodListPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&methodPtr, NULL);
