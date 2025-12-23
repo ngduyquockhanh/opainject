@@ -296,19 +296,19 @@ int injectDylibViaShellcode(task_t task, pid_t pid, const char* dylibPath, vm_ad
 
 	// STEP TWO: set up ptrace
 
-	kern_return_t ret;
-	ret = ptrace(PT_ATTACH, pid, NULL, 0);
-	if(ret != KERN_SUCCESS)
-	{
-		printf("Error attaching to process %d: %d\n", pid, errno);
-		return 1;
-	}
-	ret = ptrace(PT_CONTINUE, pid, NULL, 0);
-	if(ret != KERN_SUCCESS)
-	{
-		printf("Error continuing execution of process %d\n", pid);
-		return 1;
-	}
+	// kern_return_t ret;
+	// ret = ptrace(PT_ATTACH, pid, NULL, 0);
+	// if(ret != KERN_SUCCESS)
+	// {
+	// 	printf("Error attaching to process %d: %d\n", pid, errno);
+	// 	return 1;
+	// }
+	// ret = ptrace(PT_CONTINUE, pid, NULL, 0);
+	// if(ret != KERN_SUCCESS)
+	// {
+	// 	printf("Error continuing execution of process %d\n", pid);
+	// 	return 1;
+	// }
 
 	// STEP THREE: apply sandbox extension if needed
 
@@ -394,12 +394,12 @@ int injectDylibViaShellcode(task_t task, pid_t pid, const char* dylibPath, vm_ad
 
 	// STEP FIVE: detach from process
 
-	ret = ptrace(PT_DETACH, pid, NULL, 0);
-	if(ret != KERN_SUCCESS)
-	{
-		printf("Error detaching from process %d\n", pid);
-		return 1;
-	}
+	// ret = ptrace(PT_DETACH, pid, NULL, 0);
+	// if(ret != KERN_SUCCESS)
+	// {
+	// 	printf("Error detaching from process %d\n", pid);
+	// 	return 1;
+	// }
 
 	return 0;
 }
