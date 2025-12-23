@@ -649,11 +649,6 @@ int hookM_rop(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
 			if (isEqual) {
 				printf("[hookM_rop] Confirmed: Found matching method for selector %s\n", selName);
 				
-				// Check if method belongs to the original class or a superclass
-				uint64_t methodClass = 0;
-				// We need to figure out which class this method belongs to
-				// For now, assume it's in searchedClass if we found it here
-				
 				if (searchedClass == classPtr) {
 					// Method is in the original class - replace it
 					printf("[hookM_rop] Method found in original class, replacing IMP\n");
