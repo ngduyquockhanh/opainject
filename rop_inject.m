@@ -502,7 +502,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	size_t remoteCountLen = sizeof(uint32_t);
 	vm_address_t remoteCountPtr = 0;
-	kern_return_t kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
+	kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
 	if (kr != KERN_SUCCESS) {
 		printf("ERROR: Unable to allocate memory for count\n");
 		return;
