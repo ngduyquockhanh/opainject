@@ -498,26 +498,23 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 		return;
 	}
 
-	vm_address_t address = (vm_address_t)newImp;
-	vm_size_t size = 0;
-	uint32_t depth = 0;
-	vm_region_submap_info_data_64_t info;
-	mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT_64;
-
-	kern_return_t kr = vm_region_recurse(task, &address, &size, &depth,
-		(vm_region_recurse_info_t)&info, &info_count);
-
-	if (kr == KERN_SUCCESS) {
-		printf("[*] newImp 0x%llx nằm trong vùng nhớ:\n", (uint64_t)newImp);
-		printf("    Start: 0x%llx, Size: 0x%llx\n", (unsigned long long)address, (unsigned long long)size);
-		printf("    Protection: 0x%x (current), 0x%x (max)\n", info.protection, info.max_protection);
-		printf("    Offset: 0x%llx, Object ID: 0x%x\n", (unsigned long long)info.offset, info.object_id);
-	} else {
-		printf("[!] vm_region_recurse failed: %s\n", mach_error_string(kr));
+	uint64_t newImpPointer = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
+	if (!newImpPointer) {
+		printf("[!] remoteDlSym could not find _new__NSCFLocalSessionTask__onqueue_didReceiveChallenge in dylib!\n");
+		return;
 	}
-	
 
-	// Thay thế implementation
+	// Dereference the pointer to get the actual function address
+	uint64_t newImp = 0;
+	kern_return_t kr = task_read(task, (vm_address_t)newImpPointer, &newImp, sizeof(uint64_t));
+	if (kr != KERN_SUCCESS) {
+		printf("[!] Failed to dereference newImp pointer at 0x%llx: %s\n", (uint64_t)newImpPointer, mach_error_string(kr));
+		return;
+	}
+
+	printf("[*] newImp pointer: 0x%llx, actual function address: 0x%llx\n", (uint64_t)newImpPointer, (uint64_t)newImp);
+
+	
 	uint64_t oldImpOut = 0;
 	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
 
