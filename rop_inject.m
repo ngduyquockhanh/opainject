@@ -611,9 +611,7 @@ void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t all
 	// 	"_onqueue_sendSessionChallenge:completionHandler:", completionBypassStub, NULL);
 }
 
-// Tạo stub cho custom verify callback (always return 0)
-vm_address_t writeCustomVerifyStub(task_t task) {
-    // int custom_verify(void* ssl, void* out_alert) { return 0; }
+vm_address_t writeCustomVerifyCallbackStub(task_t task) {
     uint32_t stub[] = {
         0xd2800000, // mov x0, #0
         0xd65f03c0  // ret
@@ -628,27 +626,54 @@ vm_address_t writeCustomVerifyStub(task_t task) {
     return remoteStub;
 }
 
-vm_address_t writeFakePSKIdentityStub(task_t task) {
-    // const char* get_psk_identity(void* ssl) { return "fakePSKidentity"; }
-    // Giả sử đã có hàm writeStringToTask
-    size_t len;
-    vm_address_t remoteStr = writeStringToTask(task, "fakePSKidentity", &len);
+vm_address_t writeSetCustomVerifyWrapperStub(task_t task, uint64_t origFunc, vm_address_t customCallback) {
+    // x0: ssl, x1: mode, x2: callback (bỏ qua), gọi origFunc(x0, x1, customCallback)
+    // mov x2, customCallback; bl origFunc; ret
     uint32_t stub[] = {
-        0x58000040, // ldr x0, #8
-        0xd65f03c0, // ret
-        (uint32_t)(remoteStr & 0xFFFFFFFF), (uint32_t)(remoteStr >> 32)
+        0xd2800002, // mov x2, #0 (sẽ sửa lại bên dưới)
+        0x94000000, // bl <origFunc> (sẽ sửa lại bên dưới)
+        0xd65f03c0  // ret
     };
+    // Patch immediate cho mov x2, #customCallback
+    // movz x2, (customCallback & 0xFFFF), lsl #0
+    // movk x2, ((customCallback >> 16) & 0xFFFF), lsl #16
+    // movk x2, ((customCallback >> 32) & 0xFFFF), lsl #32
+    // movk x2, ((customCallback >> 48) & 0xFFFF), lsl #48
+    // Đơn giản: chỉ dùng movz/movk nếu cần, hoặc dùng ldr x2, =addr nếu stub lớn hơn
+    // Ở đây, để đơn giản, bạn có thể dùng ldr x2, [pc, #8] (literal pool)
+    uint32_t stub_full[] = {
+        0x58000042, // ldr x2, #8
+        0x94000000, // bl <origFunc> (sẽ sửa lại bên dưới)
+        0xd65f03c0, // ret
+        (uint32_t)(customCallback & 0xFFFFFFFF), (uint32_t)(customCallback >> 32)
+    };
+    // Tính offset cho bl
+    int64_t pc = 0; // sẽ được biết khi alloc xong
+    // Sau khi alloc, patch lại bl offset
     vm_address_t remoteStub = 0;
-    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub_full), VM_FLAGS_ANYWHERE);
     if (kr != KERN_SUCCESS) return 0;
-    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
-    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
-    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    // Patch bl offset
+    pc = remoteStub + 4; // bl ở offset 4
+    int64_t bl_off = ((int64_t)origFunc - (int64_t)pc) >> 2;
+    stub_full[1] = 0x94000000 | (bl_off & 0x03FFFFFF);
+    kr = vm_protect(task, remoteStub, sizeof(stub_full), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub_full)); return 0; }
+    kr = vm_write(task, remoteStub, (vm_address_t)stub_full, sizeof(stub_full));
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub_full)); return 0; }
     return remoteStub;
 }
 
-void hook_ssl_custom_verify(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
+void patchFunctionEntry(task_t task, uint64_t funcAddr, vm_address_t newStub) {
+    // Ghi đè 4 bytes đầu bằng branch tới newStub
+    // b newStub
+    int64_t off = (int64_t)newStub - (int64_t)funcAddr;
+    if ((off & 3) != 0) return; // phải align 4
+    int32_t b_inst = 0x14000000 | (((off >> 2) & 0x03FFFFFF));
+    vm_write(task, funcAddr, (vm_address_t)&b_inst, 4);
+}
+
+void hook_ssl_custom_verify_patch(task_t task, vm_address_t allImageInfoAddr) {
     vm_address_t libssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
     if (!libssl) return;
 
@@ -656,21 +681,20 @@ void hook_ssl_custom_verify(task_t task, thread_act_t pthread, vm_address_t allI
     uint64_t ctx_set_custom_verify = remoteDlSym(task, libssl, "_SSL_CTX_set_custom_verify");
     uint64_t get_psk_identity = remoteDlSym(task, libssl, "_SSL_get_psk_identity");
 
-    vm_address_t verifyStub = writeCustomVerifyStub(task);
-    vm_address_t fakePSKStub = writeFakePSKIdentityStub(task);
+    vm_address_t customCallback = writeCustomVerifyCallbackStub(task);
 
     if (set_custom_verify) {
-        // Thay thế implementation bằng verifyStub
-		printf("[hook_ssl_custom_verify] Hooking SSL_set_custom_verify with stub");
-        arbCall(task, pthread, NULL, false, set_custom_verify, 3, 0, 0, verifyStub);
+        vm_address_t wrapper = writeSetCustomVerifyWrapperStub(task, set_custom_verify, customCallback);
+        patchFunctionEntry(task, set_custom_verify, wrapper);
     }
     if (ctx_set_custom_verify) {
-		printf("[hook_ssl_custom_verify] Hooking SSL_CTX_set_custom_verify with stub");
-        arbCall(task, pthread, NULL, false, ctx_set_custom_verify, 3, 0, 0, verifyStub);
+        vm_address_t wrapper = writeSetCustomVerifyWrapperStub(task, ctx_set_custom_verify, customCallback);
+        patchFunctionEntry(task, ctx_set_custom_verify, wrapper);
     }
     if (get_psk_identity) {
-		printf("[hook_ssl_custom_verify] Hooking SSL_get_psk_identity with stub");
-        arbCall(task, pthread, NULL, false, get_psk_identity, 1, fakePSKStub);
+        // Patch giống cũ: trả về chuỗi fake
+        vm_address_t fakePSKStub = writeFakePSKIdentityStub(task);
+        patchFunctionEntry(task, get_psk_identity, fakePSKStub);
     }
 }
 
@@ -687,7 +711,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
 	// sslkillswitch_rop_hooks(task, pthread, allImageInfoAddr);
-	hook_ssl_custom_verify(task, pthread, allImageInfoAddr);
+	hook_ssl_custom_verify_patch(task, pthread, allImageInfoAddr);
 	
 
 	// // Lấy base address của libobjc.A.dylib
