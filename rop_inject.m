@@ -1,3 +1,6 @@
+// Hook Objective-C method in remote process using ROP, similar to hookM
+// Returns 1 if success, 0 if fail
+
 // === SSLKillSwitch ROP Hooks (Full) ===
 #include <mach/mach.h>
 #include <string.h>
@@ -38,22 +41,14 @@
 #import "arm64.h"
 #include <mach/vm_map.h>
 
-#define NSURLSessionAuthChallengeUseCredential 0
-#define NSURLSessionAuthChallengePerformDefaultHandling 1
-#define NSURLSessionAuthChallengeCancelAuthenticationChallenge 2
-#define NSURLSessionAuthChallengeUseCredentialForNextChallenge 3
-
 typedef struct {
-    uint32_t entsize_and_flags;
-    uint32_t count;
-    // Theo sau là các method entries
-} method_list_t;
-
-typedef struct {
-    uint64_t name;
-    uint64_t types;
-    uint64_t imp;
-} method_t;
+	const char* libraryName;        // Ví dụ: "/usr/lib/libcoretls.dylib"
+	const char* functionName;       // Ví dụ: "_SecTrustEvaluate"
+	uint64_t originalAddress;       // Địa chỉ function gốc
+	uint64_t hookAddress;           // Địa chỉ hook function (từ dylib)
+	uint64_t onEnter;               // Callback khi vào function (optional)
+	uint64_t onLeave;               // Callback khi thoát function (optional)
+} Interceptor;
 
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
@@ -442,23 +437,131 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
-// Stub ARM64: gọi completion block với disposition=0, credential=0 (bypass SSL pinning)
-// x4: completion block
-// mov x0, #0      // disposition = 0
-// mov x1, #0      // credential = 0
-// mov x2, x4      // block pointer
-// blr x2          // call completion block
-// ret
-unsigned char sslbypass_stub[] = {
-	0x00, 0x00, 0x80, 0xd2, // mov x0, #0
-	0x01, 0x00, 0x80, 0xd2, // mov x1, #0
-	0xe2, 0x03, 0x04, 0xaa, // mov x2, x4
-	0x40, 0x00, 0x1f, 0xd6, // blr x2
-	0xc0, 0x03, 0x5f, 0xd6  // ret
-};
-size_t sslbypass_stub_size = sizeof(sslbypass_stub);
-// Hook Objective-C method in remote process using ROP, similar to hookM
-// Returns 1 if success, 0 if fail
+#define SSL_VERIFY_NONE 0
+
+void hookBoringSSLFunctions(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
+	printf("[*] Hooking BoringSSL functions to bypass SSL verification...\n");
+
+	vm_address_t libboringssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
+	if (!libboringssl) {
+		printf("[!] libboringssl.dylib not found, trying alternatives...\n");
+		libboringssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libcoretls.dylib");
+		if (!libboringssl) {
+			printf("[!] No SSL library found\n");
+			return;
+		}
+	}
+
+	printf("[*] SSL library @ 0x%llx\n", (uint64_t)libboringssl);
+
+	// ===== Get function addresses =====
+	uint64_t SSL_set_custom_verify = remoteDlSym(task, libboringssl, "_SSL_set_custom_verify");
+	uint64_t SSL_get_psk_identity = remoteDlSym(task, libboringssl, "_SSL_get_psk_identity");
+	uint64_t SSL_set_verify = remoteDlSym(task, libboringssl, "_SSL_set_verify");
+	uint64_t SSL_verify_result_t = 0;  // Callback type
+
+	printf("[*] SSL_set_custom_verify @ 0x%llx\n", SSL_set_custom_verify);
+	printf("[*] SSL_get_psk_identity @ 0x%llx\n", SSL_get_psk_identity);
+	printf("[*] SSL_set_verify @ 0x%llx\n", SSL_set_verify);
+
+	// ===== TRICK: We can't directly hook, but we can patch memory =====
+	// Solution: Allocate trampoline that redirects calls
+
+	// Allocate space for trampoline
+	vm_address_t trampolineAddr = (vm_address_t)NULL;
+	kern_return_t kr = vm_allocate(task, &trampolineAddr, 0x2000, VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) {
+		printf("[!] Failed to allocate trampoline\n");
+		return;
+	}
+
+	kr = vm_protect(task, trampolineAddr, 0x2000, TRUE, VM_PROT_READ | VM_PROT_WRITE);
+	if (kr != KERN_SUCCESS) {
+		printf("[!] Failed to make writable\n");
+		return;
+	}
+
+	// ===== Create replacement for SSL_set_custom_verify =====
+	// Replacement does nothing - ignores custom callback
+	// This effectively bypasses SSL verification
+	
+	uint32_t replace_SSL_set_custom_verify[] = {
+		0xa9be7bfd,  // stp x29, x30, [sp, #-32]!
+		0x910003fd,  // mov x29, sp
+		
+		// Just return without doing anything
+		// x0 = ssl, x1 = mode, x2 = callback
+		// We ignore all parameters
+		
+		0xa8c27bfd,  // ldp x29, x30, [sp], #32
+		0xd65f03c0,  // ret
+	};
+
+	// ===== Create replacement for SSL_get_psk_identity =====
+	// Return fake PSK identity
+	
+	uint32_t replace_SSL_get_psk_identity[] = {
+		0xa9be7bfd,  // stp x29, x30, [sp, #-32]!
+		0x910003fd,  // mov x29, sp
+		
+		// Return fake PSK string
+		// x0 = ssl (arg)
+		// We return address to "notarealPSKidentity" string
+		
+		// mov x0, <string_address>
+		0xd2800000,  // mov x0, #0 (placeholder)
+		
+		0xa8c27bfd,  // ldp x29, x30, [sp], #32
+		0xd65f03c0,  // ret
+	};
+
+	// Write trampolines
+	vm_address_t offset1 = trampolineAddr;
+	vm_address_t offset2 = trampolineAddr + 0x100;
+
+	kr = vm_write(task, offset1, (vm_address_t)replace_SSL_set_custom_verify, 
+				  sizeof(replace_SSL_set_custom_verify));
+	kr = vm_write(task, offset2, (vm_address_t)replace_SSL_get_psk_identity, 
+				  sizeof(replace_SSL_get_psk_identity));
+
+	// Make executable
+	kr = vm_protect(task, trampolineAddr, 0x2000, TRUE, VM_PROT_READ | VM_PROT_EXECUTE);
+
+	printf("[+] Trampolines created @ 0x%llx and 0x%llx\n", (uint64_t)offset1, (uint64_t)offset2);
+
+	// ===== Patch original functions =====
+	// Replace first instruction with branch to trampoline
+
+	// Patch SSL_set_custom_verify
+	int64_t offset_ssl_set = (offset1 - SSL_set_custom_verify) >> 2;
+	if (offset_ssl_set >= -(1LL << 25) && offset_ssl_set < (1LL << 25)) {
+		uint32_t branch = 0x14000000 | (offset_ssl_set & 0x3ffffff);
+		
+		kr = vm_protect(task, SSL_set_custom_verify, 0x100, TRUE, 
+						VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+		vm_write(task, SSL_set_custom_verify, (vm_address_t)&branch, sizeof(branch));
+		vm_protect(task, SSL_set_custom_verify, 0x100, TRUE, VM_PROT_READ | VM_PROT_EXECUTE);
+		
+		printf("[+] Patched SSL_set_custom_verify\n");
+	} else {
+		printf("[!] Branch offset too large for SSL_set_custom_verify\n");
+	}
+
+	// Patch SSL_get_psk_identity
+	int64_t offset_ssl_get = (offset2 - SSL_get_psk_identity) >> 2;
+	if (offset_ssl_get >= -(1LL << 25) && offset_ssl_get < (1LL << 25)) {
+		uint32_t branch = 0x14000000 | (offset_ssl_get & 0x3ffffff);
+		
+		kr = vm_protect(task, SSL_get_psk_identity, 0x100, TRUE, 
+						VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+		vm_write(task, SSL_get_psk_identity, (vm_address_t)&branch, sizeof(branch));
+		vm_protect(task, SSL_get_psk_identity, 0x100, TRUE, VM_PROT_READ | VM_PROT_EXECUTE);
+		
+		printf("[+] Patched SSL_get_psk_identity\n");
+	} else {
+		printf("[!] Branch offset too large for SSL_get_psk_identity\n");
+	}
+}
 
 void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* dylibPath) {
 	vm_address_t libobjc = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
@@ -501,30 +604,22 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 		return;
 	}
 
-	// Thay thế implementation bằng stub bypass SSL pinning
-	vm_address_t remoteStub = 0;
-	kern_return_t kr = vm_allocate(task, &remoteStub, sslbypass_stub_size, VM_FLAGS_ANYWHERE);
-	if (kr != KERN_SUCCESS) {
-		printf("[!] vm_allocate failed: %s\n", mach_error_string(kr));
+	vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
+	if (!myDylibBase) {
+		printf("[!] Could not find injected dylib in remote process!\n");
 		return;
 	}
-	kr = vm_protect(task, remoteStub, sslbypass_stub_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-	if (kr != KERN_SUCCESS) {
-		printf("[!] vm_protect failed: %s\n", mach_error_string(kr));
-		vm_deallocate(task, remoteStub, sslbypass_stub_size);
+
+	uint64_t newImp = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
+	if (!newImp) {
+		printf("[!] remoteDlSym không tìm thấy sslbypass_challenge_hook trong dylib!\n");
 		return;
 	}
-	kr = vm_write(task, remoteStub, (vm_address_t)sslbypass_stub, sslbypass_stub_size);
-	if (kr != KERN_SUCCESS) {
-		printf("[!] vm_write failed: %s\n", mach_error_string(kr));
-		vm_deallocate(task, remoteStub, sslbypass_stub_size);
-		return;
-	}
-	printf("[*] SSL bypass stub injected at 0x%llx\n", (uint64_t)remoteStub);
 
 	uint64_t oldImpOut = 0;
-	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, remoteStub);
-	printf("[+] Hooked _onqueue_didReceiveChallenge:request:withCompletion: (stub bypass)\n");
+	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
+
+	printf("[+] Hooked _onqueue_didReceiveChallenge:request:withCompletion:\n");
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
@@ -539,34 +634,36 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
+	hookBoringSSLFunctions(task, pthread, allImageInfoAddr);
+
 	// FIND OFFSETS
-	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
-	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
+	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
+	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
+	// uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
-	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
+	// printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
 
-	// CALL DLOPEN
-	size_t remoteDylibPathSize = 0;
-	vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
-	if(remoteDylibPath)
-	{
-		void* dlopenRet;
-		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
-		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
+	// // CALL DLOPEN
+	// size_t remoteDylibPathSize = 0;
+	// vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
+	// if(remoteDylibPath)
+	// {
+	// 	void* dlopenRet;
+	// 	arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
+	// 	vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
 
-		if (dlopenRet) {
-			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
-			hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
-		}
-		else {
-			uint64_t remoteErrorString = 0;
-			arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
-			char *errorString = task_copy_string(task, remoteErrorString);
-			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
-			free(errorString);
-		}
-	}
+	// 	if (dlopenRet) {
+	// 		printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+	// 		hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
+	// 	}
+	// 	else {
+	// 		uint64_t remoteErrorString = 0;
+	// 		arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
+	// 		char *errorString = task_copy_string(task, remoteErrorString);
+	// 		printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
+	// 		free(errorString);
+	// 	}
+	// }
 
 	thread_terminate(pthread);
 }
