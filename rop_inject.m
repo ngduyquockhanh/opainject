@@ -458,7 +458,6 @@ void hookBoringSSLFunctions(task_t task, thread_act_t pthread, vm_address_t allI
 	uint64_t SSL_set_custom_verify = remoteDlSym(task, libboringssl, "_SSL_set_custom_verify");
 	uint64_t SSL_get_psk_identity = remoteDlSym(task, libboringssl, "_SSL_get_psk_identity");
 	uint64_t SSL_set_verify = remoteDlSym(task, libboringssl, "_SSL_set_verify");
-	uint64_t SSL_verify_result_t = 0;  // Callback type
 
 	printf("[*] SSL_set_custom_verify @ 0x%llx\n", SSL_set_custom_verify);
 	printf("[*] SSL_get_psk_identity @ 0x%llx\n", SSL_get_psk_identity);
