@@ -499,22 +499,22 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 	}
 
 	// Kiểm tra thông tin vùng nhớ chứa newImp
-	vm_address_t address = (vm_address_t)newImp;
-	vm_size_t size = 0;
+	mach_vm_address_t address = (mach_vm_address_t)newImp;
+	mach_vm_size_t size = 0;
 	uint32_t depth = 0;
-	vm_region_submap_info_data_t info;
-	mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT;
+	vm_region_submap_info_data_64_t info;
+	mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT_64;
 
-	kern_return_t kr = vm_region_recurse(task, &address, &size, &depth,
+	kern_return_t kr = mach_vm_region_recurse(task, &address, &size, &depth,
 		(vm_region_recurse_info_t)&info, &info_count);
 
 	if (kr == KERN_SUCCESS) {
 		printf("[*] newImp 0x%llx nằm trong vùng nhớ:\n", (uint64_t)newImp);
-		printf("    Start: 0x%lx, Size: 0x%lx\n", (unsigned long)address, (unsigned long)size);
+		printf("    Start: 0x%llx, Size: 0x%llx\n", address, size);
 		printf("    Protection: 0x%x (current), 0x%x (max)\n", info.protection, info.max_protection);
-		printf("    Offset: 0x%lx, Object ID: 0x%x\n", (unsigned long)info.offset, info.object_id);
+		printf("    Offset: 0x%llx, Object ID: 0x%x\n", info.offset, info.object_id);
 	} else {
-		printf("[!] vm_region_recurse failed: %s\n", mach_error_string(kr));
+		printf("[!] mach_vm_region_recurse failed: %s\n", mach_error_string(kr));
 	}
 
 	// Thay thế implementation
