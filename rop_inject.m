@@ -28,6 +28,9 @@
 #import <sys/stat.h>
 #import <sys/wait.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <Foundation/Foundation.h>
+#import <Security/Security.h>
+#import <objc/runtime.h>
 
 #import "pac.h"
 #import "dyld.h"
