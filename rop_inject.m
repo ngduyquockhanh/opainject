@@ -497,57 +497,31 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 		return;
 	}
 
+	// Kiểm tra thông tin vùng nhớ chứa newImp
+	mach_vm_address_t address = (mach_vm_address_t)newImp;
+	mach_vm_size_t size = 0;
+	uint32_t depth = 0;
+	vm_region_submap_info_data_64_t info;
+	mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT_64;
+
+	kern_return_t kr = mach_vm_region_recurse(task, &address, &size, &depth,
+		(vm_region_recurse_info_t)&info, &info_count);
+
+	if (kr == KERN_SUCCESS) {
+		printf("[*] newImp 0x%llx nằm trong vùng nhớ:\n", newImp);
+		printf("    Start: 0x%llx, Size: 0x%llx\n", address, size);
+		printf("    Protection: 0x%x (current), 0x%x (max)\n", info.protection, info.max_protection);
+		printf("    Shared: %d, Object Name: 0x%x\n", info.is_shared, info.object_id);
+	} else {
+		printf("[!] mach_vm_region_recurse failed: %s\n", mach_error_string(kr));
+	}
+
 	// Thay thế implementation
 	uint64_t oldImpOut = 0;
 	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
 
 	printf("[+] Hooked _onqueue_didReceiveChallenge:request:withCompletion:\n");
 }
-
-// void sslBypass(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr)
-// {
-// 	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
-// 	printf("libobjc.A.dylib base: 0x%llx\n", (unsigned long long)libObjcAddr);
-
-// 	uint64_t objcCopyClassListAddr = remoteDlSym(task, libObjcAddr, "_objc_copyClassList");
-// 	printf("objc_copyClassList address: 0x%llx\n", (unsigned long long)objcCopyClassListAddr);
-
-
-// 	// size_t remoteCountLen = sizeof(uint32_t);
-// 	// vm_address_t remoteCountPtr = 0;
-// 	// kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
-// 	// if (kr != KERN_SUCCESS) {
-// 	// 	printf("ERROR: Unable to allocate memory for count\n");
-// 	// 	return;
-// 	// }
-
-// 	// uint64_t classArrayPtr = 0;
-// 	// arbCall(task, pthread, &classArrayPtr, true, objcCopyClassListAddr, 1, remoteCountPtr);
-// 	// printf("[injectDylibViaRop] objc_copyClassList returned pointer: 0x%llx\n", classArrayPtr);
-
-// 	// uint32_t classCount = 0;
-// 	// vm_size_t outSize = 0;
-// 	// kr = vm_read_overwrite(task, remoteCountPtr, sizeof(classCount), (vm_address_t)&classCount, &outSize);
-// 	// printf("Number of classes: %u\n", classCount);
-
-// 	// for (uint32_t i = 0; i < classCount; i++) {
-// 	// 	uint64_t classPtr = 0;
-// 	// 	kr = vm_read_overwrite(task, classArrayPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&classPtr, &outSize);
-// 	// 	if (kr != KERN_SUCCESS) continue;
-
-// 	// 	// Gọi ROP để lấy tên class: class_getName
-// 	// 	uint64_t classGetNameAddr = remoteDlSym(task, libObjcAddr, "_class_getName");
-// 	// 	uint64_t namePtr = 0;
-// 	// 	arbCall(task, pthread, &namePtr, true, classGetNameAddr, 1, classPtr);
-
-// 	// 	if (namePtr) {
-// 	// 		char *className = task_copy_string(task, namePtr);
-// 	// 		printf("Class[%u]: %s\n", i, className ? className : "(null)");
-// 	// 		if (className) free(className);
-// 	// 	}
-// 	// }
-// 	// vm_deallocate(task, remoteCountPtr, remoteCountLen);
-// }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 {
