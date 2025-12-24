@@ -697,14 +697,17 @@ void hook_ssl_custom_verify_patch(task_t task, vm_address_t allImageInfoAddr) {
     vm_address_t customCallback = writeCustomVerifyCallbackStub(task);
 
     if (set_custom_verify) {
+		printf("[hook_ssl_custom_verify_patch] Patching SSL_set_custom_verify");
         vm_address_t wrapper = writeSetCustomVerifyWrapperStub(task, set_custom_verify, customCallback);
         patchFunctionEntry(task, set_custom_verify, wrapper);
     }
     if (ctx_set_custom_verify) {
+		printf("[hook_ssl_custom_verify_patch] Patching SSL_CTX_set_custom_verify");
         vm_address_t wrapper = writeSetCustomVerifyWrapperStub(task, ctx_set_custom_verify, customCallback);
         patchFunctionEntry(task, ctx_set_custom_verify, wrapper);
     }
     if (get_psk_identity) {
+		printf("[hook_ssl_custom_verify_patch] Patching SSL_get_psk_identity");
         // Patch giống cũ: trả về chuỗi fake
         vm_address_t fakePSKStub = writeFakePSKIdentityStub(task);
         patchFunctionEntry(task, get_psk_identity, fakePSKStub);
