@@ -42,15 +42,6 @@
 #import "arm64.h"
 #include <mach/vm_map.h>
 
-typedef struct {
-	const char* libraryName;        // Ví dụ: "/usr/lib/libcoretls.dylib"
-	const char* functionName;       // Ví dụ: "_SecTrustEvaluate"
-	uint64_t originalAddress;       // Địa chỉ function gốc
-	uint64_t hookAddress;           // Địa chỉ hook function (từ dylib)
-	uint64_t onEnter;               // Callback khi vào function (optional)
-	uint64_t onLeave;               // Callback khi thoát function (optional)
-} Interceptor;
-
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
 {
@@ -488,7 +479,7 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 
 	uint64_t newImp = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
 	if (!newImp) {
-		printf("[!] remoteDlSym không tìm thấy sslbypass_challenge_hook trong dylib!\n");
+		printf("[!] Could not find _new__NSCFLocalSessionTask__onqueue_didReceiveChallenge in dylib!\n");
 		return;
 	}
 
