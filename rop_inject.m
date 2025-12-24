@@ -627,13 +627,6 @@ vm_address_t writeCustomVerifyCallbackStub(task_t task) {
 }
 
 vm_address_t writeSetCustomVerifyWrapperStub(task_t task, uint64_t origFunc, vm_address_t customCallback) {
-    // x0: ssl, x1: mode, x2: callback (bỏ qua), gọi origFunc(x0, x1, customCallback)
-    // mov x2, customCallback; bl origFunc; ret
-    uint32_t stub[] = {
-        0xd2800002, // mov x2, #0 (sẽ sửa lại bên dưới)
-        0x94000000, // bl <origFunc> (sẽ sửa lại bên dưới)
-        0xd65f03c0  // ret
-    };
     // Patch immediate cho mov x2, #customCallback
     // movz x2, (customCallback & 0xFFFF), lsl #0
     // movk x2, ((customCallback >> 16) & 0xFFFF), lsl #16
@@ -711,7 +704,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
 	// sslkillswitch_rop_hooks(task, pthread, allImageInfoAddr);
-	hook_ssl_custom_verify_patch(task, pthread, allImageInfoAddr);
+	hook_ssl_custom_verify_patch(task, allImageInfoAddr);
 	
 
 	// // Lấy base address của libobjc.A.dylib
