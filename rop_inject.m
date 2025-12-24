@@ -492,23 +492,23 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 		return;
 	}
 
-	uint64_t newImpPointer = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
-	if (!newImpPointer) {
+	uint64_t newImp = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
+	if (!newImp) {
 		printf("[!] remoteDlSym could not find _new__NSCFLocalSessionTask__onqueue_didReceiveChallenge in dylib!\n");
 		return;
 	}
 
-	// Dereference the pointer to get the actual function address
-	uint64_t newImp = 0;
-	kern_return_t kr = task_read(task, (vm_address_t)newImpPointer, &newImp, sizeof(uint64_t));
-	if (kr != KERN_SUCCESS) {
-		printf("[!] Failed to dereference newImp pointer at 0x%llx: %s\n", (uint64_t)newImpPointer, mach_error_string(kr));
-		return;
+	printf("[*] newImp direct address from remoteDlSym: 0x%llx\n", (uint64_t)newImp);
+
+#if __arm64e__
+	// For ARM64e with PAC, make the address callable
+	if (!(bootstrapThreadState.ts_64.__opaque_flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH)) {
+		newImp = (uint64_t)make_sym_callable((void*)newImp);
+		printf("[*] After PAC signing: 0x%llx\n", (uint64_t)newImp);
 	}
+#endif
 
-	printf("[*] newImp pointer: 0x%llx, actual function address: 0x%llx\n", (uint64_t)newImpPointer, (uint64_t)newImp);
-
-	
+	// Thay thế implementation
 	uint64_t oldImpOut = 0;
 	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
 
