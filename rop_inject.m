@@ -438,210 +438,6 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
-#define SSL_VERIFY_NONE 0
-
-void hookBoringSSLIndirectJump(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
-	printf("[*] Hooking BoringSSL with indirect jump...\n");
-
-	vm_address_t libboringssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
-	if (!libboringssl) {
-		libboringssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libcoretls.dylib");
-		if (!libboringssl) {
-			printf("[!] No SSL library found\n");
-			return;
-		}
-	}
-
-	printf("[*] SSL library @ 0x%llx\n", (uint64_t)libboringssl);
-
-	// ===== Get function addresses =====
-	uint64_t SSL_set_custom_verify = remoteDlSym(task, libboringssl, "_SSL_set_custom_verify");
-	uint64_t SSL_get_psk_identity = remoteDlSym(task, libboringssl, "_SSL_get_psk_identity");
-
-	printf("[*] SSL_set_custom_verify @ 0x%llx\n", SSL_set_custom_verify);
-	printf("[*] SSL_get_psk_identity @ 0x%llx\n", SSL_get_psk_identity);
-
-	// ===== Allocate space for replacements + jump table =====
-	vm_address_t hookAddr = (vm_address_t)NULL;
-	kern_return_t kr = vm_allocate(task, &hookAddr, 0x4000, VM_FLAGS_ANYWHERE);
-	if (kr != KERN_SUCCESS) {
-		printf("[!] Failed to allocate hook space\n");
-		return;
-	}
-
-	printf("[*] Hook space allocated @ 0x%llx\n", (uint64_t)hookAddr);
-
-	kr = vm_protect(task, hookAddr, 0x4000, TRUE, VM_PROT_READ | VM_PROT_WRITE);
-	if (kr != KERN_SUCCESS) {
-		printf("[!] Failed to make writable\n");
-		return;
-	}
-
-	// ===== Create replacement for SSL_set_custom_verify =====
-	// Indirect jump pattern:
-	// ADRP x16, <page of jump_table>
-	// LDR x16, [x16, <offset in page>]
-	// BR x16
-	
-	vm_address_t replace_addr1 = hookAddr;
-	
-	// ARM64 indirect jump (3 instructions = 12 bytes)
-	uint32_t replace_SSL_set_custom_verify[] = {
-		// adrp x16, <jump_table_page> - we'll patch this
-		0x90000010,  // placeholder - will be patched with actual page
-		
-		// ldr x16, [x16, <offset>]
-		0xf9400210,  // ldr x16, [x16, 0] (offset 0)
-		
-		// br x16
-		0xd61f0200,  // br x16
-		
-		// Padding
-		0xd503201f,  // nop
-	};
-
-	vm_address_t replace_addr2 = replace_addr1 + 0x100;
-
-	uint32_t replace_SSL_get_psk_identity[] = {
-		// adrp x16, <jump_table_page>
-		0x90000010,  // placeholder
-		
-		// ldr x16, [x16, 8] (load from offset 8 in jump table)
-		0xf9400410,  // ldr x16, [x16, 8]
-		
-		// br x16
-		0xd61f0200,  // br x16
-		
-		// Padding
-		0xd503201f,  // nop
-	};
-
-	// Write replacements
-	kr = vm_write(task, replace_addr1, (vm_address_t)replace_SSL_set_custom_verify, 
-				  sizeof(replace_SSL_set_custom_verify));
-	kr = vm_write(task, replace_addr2, (vm_address_t)replace_SSL_get_psk_identity, 
-				  sizeof(replace_SSL_get_psk_identity));
-
-	printf("[*] Replacement 1 @ 0x%llx\n", (uint64_t)replace_addr1);
-	printf("[*] Replacement 2 @ 0x%llx\n", (uint64_t)replace_addr2);
-
-	// ===== Create jump table =====
-	vm_address_t jumpTableAddr = hookAddr + 0x1000;
-	
-	uint64_t jumpTable[] = {
-		// Entry 0: real replacement for SSL_set_custom_verify (does nothing)
-		replace_addr1 + 12,  // Skip the adrp/ldr, jump to br
-		
-		// Entry 1: real replacement for SSL_get_psk_identity
-		replace_addr2 + 12,  // Skip to br
-	};
-
-	kr = vm_write(task, jumpTableAddr, (vm_address_t)jumpTable, sizeof(jumpTable));
-	printf("[*] Jump table @ 0x%llx\n", (uint64_t)jumpTableAddr);
-
-	// ===== BETTER APPROACH: Use simpler inline code =====
-	// Don't use indirect jump, instead allocate replacement CLOSE TO original
-	
-	// Problem: We need replacements near original functions, not at arbitrary address
-	// Solution: Use ROP gadgets or simpler approach
-	
-	// ===== SIMPLEST: Allocate near original, use direct branch =====
-	
-	// Try to allocate near SSL_set_custom_verify
-	// First, find a free region near the function
-	
-	vm_address_t nearAddr = SSL_set_custom_verify & ~0xFFF;  // Align to page
-	vm_address_t candidate = nearAddr - 0x100000;  // Try 1MB below
-	
-	printf("[*] Trying to allocate near original @ 0x%llx\n", (uint64_t)candidate);
-	
-	// Actually, we can't allocate at specific address, only VM_FLAGS_ANYWHERE
-	// But we can use ADRP + ADD for page addressing
-	
-	// ===== REAL SOLUTION: Patch with MOV + BR instructions =====
-	// These are size-limited but can encode small offsets
-	
-	// For large offsets: use MOVZ/MOVK chain or create thunk
-	
-	printf("[!] Direct branch too far, need different approach\n");
-	printf("[*] Creating thunk via MOVZ/MOVK/BR pattern...\n");
-
-	// ===== FINAL SOLUTION: Overwrite with MOVZ + MOVK + BR =====
-	// This is a 3-instruction sequence that can reach any 64-bit address
-	
-	// Pattern for SSL_set_custom_verify:
-	// movz x16, #(addr & 0xFFFF)
-	// movk x16, #((addr >> 16) & 0xFFFF), lsl #16
-	// movk x16, #((addr >> 32) & 0xFFFF), lsl #32
-	// movk x16, #((addr >> 48) & 0xFFFF), lsl #48
-	// br x16
-	
-	// But this requires 5 instructions = 20 bytes, might overwrite more code
-	// Safer: allocate thunk pool and use smaller patch
-	
-	// ===== PRACTICAL APPROACH: Just NOP out the function =====
-	// Simplest: replace function with just RET
-	
-	printf("[*] Patching functions to just return (NOP approach)...\n");
-
-	// Patch SSL_set_custom_verify
-	uint32_t retInst = 0xd65f03c0;  // ret
-	
-	kr = vm_protect(task, SSL_set_custom_verify, 0x100, TRUE, 
-					VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-	if (kr != KERN_SUCCESS) {
-		printf("[!] Failed to make SSL_set_custom_verify writable\n");
-		return;
-	}
-	
-	kr = vm_write(task, SSL_set_custom_verify, (vm_address_t)&retInst, sizeof(retInst));
-	if (kr != KERN_SUCCESS) {
-		printf("[!] Failed to patch SSL_set_custom_verify\n");
-		vm_protect(task, SSL_set_custom_verify, 0x100, TRUE, VM_PROT_READ | VM_PROT_EXECUTE);
-		return;
-	}
-
-	vm_protect(task, SSL_set_custom_verify, 0x100, TRUE, VM_PROT_READ | VM_PROT_EXECUTE);
-	printf("[+] Patched SSL_set_custom_verify (NOP - just returns)\n");
-
-	// Patch SSL_get_psk_identity - return fake PSK
-	// mov x0, <string_address>; ret
-	// First allocate string
-	
-	vm_address_t fakeString = writeStringToTask(task, "notarealPSKidentity", NULL);
-	printf("[*] Fake PSK @ 0x%llx\n", (uint64_t)fakeString);
-
-	// Create: MOVZ x0, (fakeString & 0xFFFF); MOVK x0, ((fakeString >> 16) & 0xFFFF), lsl 16; RET
-	uint32_t ssl_get_psk_patch[] = {
-		// movz x0, #(addr & 0xFFFF)
-		0xd2800000 | ((fakeString & 0xFFFF) << 5),
-		
-		// movk x0, #((addr >> 16) & 0xFFFF), lsl 16
-		0xf2a00000 | (((fakeString >> 16) & 0xFFFF) << 5),
-		
-		// movk x0, #((addr >> 32) & 0xFFFF), lsl 32  
-		0xf2c00000 | (((fakeString >> 32) & 0xFFFF) << 5),
-		
-		// ret
-		0xd65f03c0,
-	};
-
-	kr = vm_protect(task, SSL_get_psk_identity, 0x100, TRUE, 
-					VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-	kr = vm_write(task, SSL_get_psk_identity, (vm_address_t)ssl_get_psk_patch, 
-				  sizeof(ssl_get_psk_patch));
-	vm_protect(task, SSL_get_psk_identity, 0x100, TRUE, VM_PROT_READ | VM_PROT_EXECUTE);
-
-	printf("[+] Patched SSL_get_psk_identity (returns fake PSK)\n");
-
-	// Flush instruction cache
-	extern void sys_icache_invalidate(void *start, size_t len);
-	sys_icache_invalidate((void*)SSL_set_custom_verify, 0x100);
-	sys_icache_invalidate((void*)SSL_get_psk_identity, 0x100);
-
-	printf("[+] BoringSSL hooked successfully!\n");
-}
-
 
 void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* dylibPath) {
 	vm_address_t libobjc = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
@@ -714,36 +510,34 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	hookBoringSSLIndirectJump(task, pthread, allImageInfoAddr);
-
 	// FIND OFFSETS
-	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
-	// uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
+	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
+	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
+	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
-	// printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
+	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
 
-	// // CALL DLOPEN
-	// size_t remoteDylibPathSize = 0;
-	// vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
-	// if(remoteDylibPath)
-	// {
-	// 	void* dlopenRet;
-	// 	arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
-	// 	vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
+	// CALL DLOPEN
+	size_t remoteDylibPathSize = 0;
+	vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
+	if(remoteDylibPath)
+	{
+		void* dlopenRet;
+		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
+		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
 
-	// 	if (dlopenRet) {
-	// 		printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
-	// 		hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
-	// 	}
-	// 	else {
-	// 		uint64_t remoteErrorString = 0;
-	// 		arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
-	// 		char *errorString = task_copy_string(task, remoteErrorString);
-	// 		printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
-	// 		free(errorString);
-	// 	}
-	// }
+		if (dlopenRet) {
+			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+			hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
+		}
+		else {
+			uint64_t remoteErrorString = 0;
+			arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
+			char *errorString = task_copy_string(task, remoteErrorString);
+			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
+			free(errorString);
+		}
+	}
 
 	thread_terminate(pthread);
 }
