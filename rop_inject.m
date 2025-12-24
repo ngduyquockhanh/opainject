@@ -445,7 +445,6 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 }
 
 void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* dylibPath) {
-	// 1. Lấy địa chỉ các hàm runtime
 	vm_address_t libobjc = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
 	uint64_t objc_getClass = remoteDlSym(task, libobjc, "_objc_getClass");
 	uint64_t sel_registerName = remoteDlSym(task, libobjc, "_sel_registerName");
@@ -453,7 +452,6 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 	uint64_t method_getImplementation = remoteDlSym(task, libobjc, "_method_getImplementation");
 	uint64_t method_setImplementation = remoteDlSym(task, libobjc, "_method_setImplementation");
 
-	// 2. Lấy class và selector
 	vm_address_t className = writeStringToTask(task, "__NSCFLocalSessionTask", NULL);
 	vm_address_t selName = writeStringToTask(task, "_onqueue_didReceiveChallenge:request:withCompletion:", NULL);
 	printf("[+] Hooking _onqueue_didReceiveChallenge:request:withCompletion: of __NSCFLocalSessionTask\n");
@@ -471,10 +469,10 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 	arbCall(task, pthread, &oldImp, true, method_getImplementation, 1, methodPtr);
 
 	vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-	printf("[injectDylibViaRop] myDylibBase: 0x%llx\n", myDylibBase);
+	printf("[injectDylibViaRop] myDylibBase: 0x%lx\n", myDylibBase);
 
 	uint64_t newImp = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
-	printf("[injectDylibViaRop] _my_entrypoint: 0x%llx\n", newImp);
+	printf("[injectDylibViaRop] _my_entrypoint: 0x%lx\n", newImp);
 
 	if (!newImp) {
 		printf("[!] remoteDlSym không tìm thấy sslbypass_challenge_hook trong dylib!\n");
