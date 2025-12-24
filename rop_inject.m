@@ -497,7 +497,7 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 		printf("[!] remoteDlSym không tìm thấy sslbypass_challenge_hook trong dylib!\n");
 		return;
 	}
-n
+
 	uint64_t oldImpOut = 0;
 	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
 
