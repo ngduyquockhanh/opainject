@@ -1,6 +1,3 @@
-// Hook Objective-C method in remote process using ROP, similar to hookM
-// Returns 1 if success, 0 if fail
-
 // === SSLKillSwitch ROP Hooks (Full) ===
 #include <mach/mach.h>
 #include <string.h>
@@ -445,6 +442,24 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
+// Stub ARM64: gọi completion block với disposition=0, credential=0 (bypass SSL pinning)
+// x4: completion block
+// mov x0, #0      // disposition = 0
+// mov x1, #0      // credential = 0
+// mov x2, x4      // block pointer
+// blr x2          // call completion block
+// ret
+unsigned char sslbypass_stub[] = {
+	0x00, 0x00, 0x80, 0xd2, // mov x0, #0
+	0x01, 0x00, 0x80, 0xd2, // mov x1, #0
+	0xe2, 0x03, 0x04, 0xaa, // mov x2, x4
+	0x40, 0x00, 0x1f, 0xd6, // blr x2
+	0xc0, 0x03, 0x5f, 0xd6  // ret
+};
+size_t sslbypass_stub_size = sizeof(sslbypass_stub);
+// Hook Objective-C method in remote process using ROP, similar to hookM
+// Returns 1 if success, 0 if fail
+
 void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* dylibPath) {
 	vm_address_t libobjc = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
 	uint64_t objc_getClass = remoteDlSym(task, libobjc, "_objc_getClass");
@@ -486,22 +501,30 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 		return;
 	}
 
-	vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-	if (!myDylibBase) {
-		printf("[!] Could not find injected dylib in remote process!\n");
+	// Thay thế implementation bằng stub bypass SSL pinning
+	vm_address_t remoteStub = 0;
+	kern_return_t kr = vm_allocate(task, &remoteStub, sslbypass_stub_size, VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) {
+		printf("[!] vm_allocate failed: %s\n", mach_error_string(kr));
 		return;
 	}
-
-	uint64_t newImp = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
-	if (!newImp) {
-		printf("[!] remoteDlSym không tìm thấy sslbypass_challenge_hook trong dylib!\n");
+	kr = vm_protect(task, remoteStub, sslbypass_stub_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+	if (kr != KERN_SUCCESS) {
+		printf("[!] vm_protect failed: %s\n", mach_error_string(kr));
+		vm_deallocate(task, remoteStub, sslbypass_stub_size);
 		return;
 	}
+	kr = vm_write(task, remoteStub, (vm_address_t)sslbypass_stub, sslbypass_stub_size);
+	if (kr != KERN_SUCCESS) {
+		printf("[!] vm_write failed: %s\n", mach_error_string(kr));
+		vm_deallocate(task, remoteStub, sslbypass_stub_size);
+		return;
+	}
+	printf("[*] SSL bypass stub injected at 0x%llx\n", (uint64_t)remoteStub);
 
 	uint64_t oldImpOut = 0;
-	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
-
-	printf("[+] Hooked _onqueue_didReceiveChallenge:request:withCompletion:\n");
+	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, remoteStub);
+	printf("[+] Hooked _onqueue_didReceiveChallenge:request:withCompletion: (stub bypass)\n");
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
