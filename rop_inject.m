@@ -31,6 +31,7 @@
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 #import <objc/runtime.h>
+#include <libkern/OSCacheControl.h>
 
 #import "pac.h"
 #import "dyld.h"
@@ -634,13 +635,13 @@ void hookBoringSSLIndirectJump(task_t task, thread_act_t pthread, vm_address_t a
 	printf("[+] Patched SSL_get_psk_identity (returns fake PSK)\n");
 
 	// Flush instruction cache
+	extern void sys_icache_invalidate(void *start, size_t len);
 	sys_icache_invalidate((void*)SSL_set_custom_verify, 0x100);
 	sys_icache_invalidate((void*)SSL_get_psk_identity, 0x100);
 
 	printf("[+] BoringSSL hooked successfully!\n");
 }
 
-extern void sys_icache_invalidate(void *start, size_t len);
 
 void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* dylibPath) {
 	vm_address_t libobjc = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
@@ -713,7 +714,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	hookBoringSSLFunctions(task, pthread, allImageInfoAddr);
+	hookBoringSSLIndirectJump(task, pthread, allImageInfoAddr);
 
 	// FIND OFFSETS
 	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
