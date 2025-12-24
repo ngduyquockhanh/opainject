@@ -611,6 +611,66 @@ void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t all
 	// 	"_onqueue_sendSessionChallenge:completionHandler:", completionBypassStub, NULL);
 }
 
+// Tạo stub cho custom verify callback (always return 0)
+vm_address_t writeCustomVerifyStub(task_t task) {
+    // int custom_verify(void* ssl, void* out_alert) { return 0; }
+    uint32_t stub[] = {
+        0xd2800000, // mov x0, #0
+        0xd65f03c0  // ret
+    };
+    vm_address_t remoteStub = 0;
+    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) return 0;
+    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    return remoteStub;
+}
+
+vm_address_t writeFakePSKIdentityStub(task_t task) {
+    // const char* get_psk_identity(void* ssl) { return "fakePSKidentity"; }
+    // Giả sử đã có hàm writeStringToTask
+    size_t len;
+    vm_address_t remoteStr = writeStringToTask(task, "fakePSKidentity", &len);
+    uint32_t stub[] = {
+        0x58000040, // ldr x0, #8
+        0xd65f03c0, // ret
+        (uint32_t)(remoteStr & 0xFFFFFFFF), (uint32_t)(remoteStr >> 32)
+    };
+    vm_address_t remoteStub = 0;
+    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) return 0;
+    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    return remoteStub;
+}
+
+void hook_ssl_custom_verify(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
+    vm_address_t libssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libssl.dylib");
+    if (!libssl) return;
+
+    uint64_t set_custom_verify = remoteDlSym(task, libssl, "_SSL_set_custom_verify");
+    uint64_t ctx_set_custom_verify = remoteDlSym(task, libssl, "_SSL_CTX_set_custom_verify");
+    uint64_t get_psk_identity = remoteDlSym(task, libssl, "_SSL_get_psk_identity");
+
+    vm_address_t verifyStub = writeCustomVerifyStub(task);
+    vm_address_t fakePSKStub = writeFakePSKIdentityStub(task);
+
+    if (set_custom_verify) {
+        // Thay thế implementation bằng verifyStub
+        arbCall(task, pthread, NULL, false, set_custom_verify, 3, 0, 0, verifyStub);
+    }
+    if (ctx_set_custom_verify) {
+        arbCall(task, pthread, NULL, false, ctx_set_custom_verify, 3, 0, 0, verifyStub);
+    }
+    if (get_psk_identity) {
+        arbCall(task, pthread, NULL, false, get_psk_identity, 1, fakePSKStub);
+    }
+}
+
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 {
 	prepareForMagic(task, allImageInfoAddr);
@@ -623,7 +683,8 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	sslkillswitch_rop_hooks(task, pthread, allImageInfoAddr);
+	// sslkillswitch_rop_hooks(task, pthread, allImageInfoAddr);
+	hook_ssl_custom_verify(task, pthread, allImageInfoAddr);
 	
 
 	// // Lấy base address của libobjc.A.dylib
