@@ -444,15 +444,12 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
-vm_address_t writeFakePSKIdentityStub(task_t task) {
-    // const char* get_psk_identity(void* ssl) { return "fakePSKidentity"; }
-    // Giả sử đã có hàm writeStringToTask
-    size_t len;
-    vm_address_t remoteStr = writeStringToTask(task, "fakePSKidentity", &len);
+vm_address_t writeChallengeBypassStub(task_t task) {
     uint32_t stub[] = {
-        0x58000040, // ldr x0, #8
-        0xd65f03c0, // ret
-        (uint32_t)(remoteStr & 0xFFFFFFFF), (uint32_t)(remoteStr >> 32)
+        0xd2800000, // mov x0, #0
+        0xd2800001, // mov x1, #0
+        0xd63f0080, // blr x4
+        0xd65f03c0  // ret
     };
     vm_address_t remoteStub = 0;
     kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
@@ -464,101 +461,88 @@ vm_address_t writeFakePSKIdentityStub(task_t task) {
     return remoteStub;
 }
 
-vm_address_t writeCustomVerifyCallbackStub(task_t task) {
-	// Allocate a marker in remote memory for logging
-	static vm_address_t log_marker_addr = 0;
-	if (!log_marker_addr) {
-		kern_return_t kr = vm_allocate(task, &log_marker_addr, 0x1000, VM_FLAGS_ANYWHERE);
-		if (kr != KERN_SUCCESS) log_marker_addr = 0;
-	}
-	// movz x1, #0xBEEF; str w1, [x0]; mov x0, #0; ret
-	// x0 = log_marker_addr
-	uint32_t stub[] = {
-		0x58000040, // ldr x0, #8
-		0xd28017a1, // movz x1, #0xbeef
-		0xb9000001, // str w1, [x0]
-		0xd2800000, // mov x0, #0
-		0xd65f03c0, // ret
-		(uint32_t)(log_marker_addr & 0xFFFFFFFF), (uint32_t)(log_marker_addr >> 32)
-	};
-	vm_address_t remoteStub = 0;
-	kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
-	if (kr != KERN_SUCCESS) return 0;
-	kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-	if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
-	kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
-	if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
-	printf("[writeCustomVerifyCallbackStub] log_marker_addr = 0x%llx\n", (unsigned long long)log_marker_addr);
-	return remoteStub;
+void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
+    // 1. Lấy địa chỉ các hàm runtime
+    vm_address_t libobjc = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
+    uint64_t objc_getClass = remoteDlSym(task, libobjc, "_objc_getClass");
+    uint64_t sel_registerName = remoteDlSym(task, libobjc, "_sel_registerName");
+    uint64_t class_getInstanceMethod = remoteDlSym(task, libobjc, "_class_getInstanceMethod");
+    uint64_t method_getImplementation = remoteDlSym(task, libobjc, "_method_getImplementation");
+    uint64_t method_setImplementation = remoteDlSym(task, libobjc, "_method_setImplementation");
+
+    // 2. Lấy class và selector
+    vm_address_t className = writeStringToTask(task, "__NSCFLocalSessionTask", NULL);
+    vm_address_t selName = writeStringToTask(task, "_onqueue_didReceiveChallenge:request:withCompletion:", NULL);
+	printf("[+] Hooking _onqueue_didReceiveChallenge:request:withCompletion: of __NSCFLocalSessionTask\n");
+
+    uint64_t classPtr = 0;
+    arbCall(task, pthread, &classPtr, true, objc_getClass, 1, className);
+
+    uint64_t selPtr = 0;
+    arbCall(task, pthread, &selPtr, true, sel_registerName, 1, selName);
+
+    // 3. Lấy Method*
+    uint64_t methodPtr = 0;
+    arbCall(task, pthread, &methodPtr, true, class_getInstanceMethod, 2, classPtr, selPtr);
+
+    // 4. Lấy IMP cũ (nếu muốn backup)
+    uint64_t oldImp = 0;
+    arbCall(task, pthread, &oldImp, true, method_getImplementation, 1, methodPtr);
+
+    // 5. Ghi stub mới vào process target (ví dụ: always call completion(NSURLSessionAuthChallengeUseCredential, credential))
+    // Bạn cần tự viết stub ARM64, hoặc dùng Frida để dump stub rồi chép vào.
+    vm_address_t newImp = writeChallengeBypassStub(task); // Địa chỉ stub mới đã ghi vào process target
+
+    // 6. Thay thế implementation
+    uint64_t oldImpOut = 0;
+    arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
+
+    printf("[+] Hooked _onqueue_didReceiveChallenge:request:withCompletion:\n");
 }
 
-vm_address_t writeSetCustomVerifyWrapperStub(task_t task, uint64_t origFunc, vm_address_t customCallback) {
-    // Patch immediate cho mov x2, #customCallback
-    // movz x2, (customCallback & 0xFFFF), lsl #0
-    // movk x2, ((customCallback >> 16) & 0xFFFF), lsl #16
-    // movk x2, ((customCallback >> 32) & 0xFFFF), lsl #32
-    // movk x2, ((customCallback >> 48) & 0xFFFF), lsl #48
-    // Đơn giản: chỉ dùng movz/movk nếu cần, hoặc dùng ldr x2, =addr nếu stub lớn hơn
-    // Ở đây, để đơn giản, bạn có thể dùng ldr x2, [pc, #8] (literal pool)
-    uint32_t stub_full[] = {
-        0x58000042, // ldr x2, #8
-        0x94000000, // bl <origFunc> (sẽ sửa lại bên dưới)
-        0xd65f03c0, // ret
-        (uint32_t)(customCallback & 0xFFFFFFFF), (uint32_t)(customCallback >> 32)
-    };
-    // Tính offset cho bl
-    int64_t pc = 0; // sẽ được biết khi alloc xong
-    // Sau khi alloc, patch lại bl offset
-    vm_address_t remoteStub = 0;
-    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub_full), VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS) return 0;
-    // Patch bl offset
-    pc = remoteStub + 4; // bl ở offset 4
-    int64_t bl_off = ((int64_t)origFunc - (int64_t)pc) >> 2;
-    stub_full[1] = 0x94000000 | (bl_off & 0x03FFFFFF);
-    kr = vm_protect(task, remoteStub, sizeof(stub_full), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub_full)); return 0; }
-    kr = vm_write(task, remoteStub, (vm_address_t)stub_full, sizeof(stub_full));
-    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub_full)); return 0; }
-    return remoteStub;
-}
+void sslBypass(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr)
+{
+	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
+	printf("libobjc.A.dylib base: 0x%llx\n", (unsigned long long)libObjcAddr);
 
-void patchFunctionEntry(task_t task, uint64_t funcAddr, vm_address_t newStub) {
-    // Ghi đè 4 bytes đầu bằng branch tới newStub
-    // b newStub
-    int64_t off = (int64_t)newStub - (int64_t)funcAddr;
-    if ((off & 3) != 0) return; // phải align 4
-    int32_t b_inst = 0x14000000 | (((off >> 2) & 0x03FFFFFF));
-    vm_write(task, funcAddr, (vm_address_t)&b_inst, 4);
-}
+	uint64_t objcCopyClassListAddr = remoteDlSym(task, libObjcAddr, "_objc_copyClassList");
+	printf("objc_copyClassList address: 0x%llx\n", (unsigned long long)objcCopyClassListAddr);
 
 
-void hook_ssl_custom_verify_patch(task_t task, vm_address_t allImageInfoAddr) {
-    vm_address_t libssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
-    if (!libssl) return;
+	// size_t remoteCountLen = sizeof(uint32_t);
+	// vm_address_t remoteCountPtr = 0;
+	// kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
+	// if (kr != KERN_SUCCESS) {
+	// 	printf("ERROR: Unable to allocate memory for count\n");
+	// 	return;
+	// }
 
-    uint64_t set_custom_verify = remoteDlSym(task, libssl, "_SSL_set_custom_verify");
-    uint64_t ctx_set_custom_verify = remoteDlSym(task, libssl, "_SSL_CTX_set_custom_verify");
-    uint64_t get_psk_identity = remoteDlSym(task, libssl, "_SSL_get_psk_identity");
+	// uint64_t classArrayPtr = 0;
+	// arbCall(task, pthread, &classArrayPtr, true, objcCopyClassListAddr, 1, remoteCountPtr);
+	// printf("[injectDylibViaRop] objc_copyClassList returned pointer: 0x%llx\n", classArrayPtr);
 
-    vm_address_t customCallback = writeCustomVerifyCallbackStub(task);
+	// uint32_t classCount = 0;
+	// vm_size_t outSize = 0;
+	// kr = vm_read_overwrite(task, remoteCountPtr, sizeof(classCount), (vm_address_t)&classCount, &outSize);
+	// printf("Number of classes: %u\n", classCount);
 
-    if (set_custom_verify) {
-		printf("[hook_ssl_custom_verify_patch] Patching SSL_set_custom_verify\n");
-        vm_address_t wrapper = writeSetCustomVerifyWrapperStub(task, set_custom_verify, customCallback);
-        patchFunctionEntry(task, set_custom_verify, wrapper);
-    }
-    if (ctx_set_custom_verify) {
-		printf("[hook_ssl_custom_verify_patch] Patching SSL_CTX_set_custom_verify\n");
-        vm_address_t wrapper = writeSetCustomVerifyWrapperStub(task, ctx_set_custom_verify, customCallback);
-        patchFunctionEntry(task, ctx_set_custom_verify, wrapper);
-    }
-    if (get_psk_identity) {
-		printf("[hook_ssl_custom_verify_patch] Patching SSL_get_psk_identity\n");
-        // Patch giống cũ: trả về chuỗi fake
-        vm_address_t fakePSKStub = writeFakePSKIdentityStub(task);
-        patchFunctionEntry(task, get_psk_identity, fakePSKStub);
-    }
+	// for (uint32_t i = 0; i < classCount; i++) {
+	// 	uint64_t classPtr = 0;
+	// 	kr = vm_read_overwrite(task, classArrayPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&classPtr, &outSize);
+	// 	if (kr != KERN_SUCCESS) continue;
+
+	// 	// Gọi ROP để lấy tên class: class_getName
+	// 	uint64_t classGetNameAddr = remoteDlSym(task, libObjcAddr, "_class_getName");
+	// 	uint64_t namePtr = 0;
+	// 	arbCall(task, pthread, &namePtr, true, classGetNameAddr, 1, classPtr);
+
+	// 	if (namePtr) {
+	// 		char *className = task_copy_string(task, namePtr);
+	// 		printf("Class[%u]: %s\n", i, className ? className : "(null)");
+	// 		if (className) free(className);
+	// 	}
+	// }
+	// vm_deallocate(task, remoteCountPtr, remoteCountLen);
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
@@ -573,7 +557,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	hook_ssl_custom_verify_patch(task, allImageInfoAddr);
+	sslBypass(task, pthread, allImageInfoAddr);
 	
 
 	thread_terminate(pthread);
