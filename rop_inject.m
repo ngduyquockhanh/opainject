@@ -444,173 +444,6 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
-vm_address_t writeSSLChallengeBypassStub(task_t task) {
-    // mov x0, #0              ; disposition = NSURLSessionAuthChallengeUseCredential (0)
-    // mov x1, #0              ; credential = NULL
-    // blr x3                  ; call completion handler (preserve LR)
-    // ret                     ; return (void)
-    uint32_t stub[] = {
-        0xd2800000,             // mov x0, #0
-        0xd2800001,             // mov x1, #0
-        0xd63f0060,             // blr x3
-        0xd65f03c0              // ret
-    };
-    // ...allocate, protect, write như cũ...
-    vm_address_t remoteStub = 0;
-    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS) return 0;
-    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
-    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
-    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
-    return remoteStub;
-}
-
-
-int hookM_rop_with_completion(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, 
-                              const char* className, const char* selName, uint64_t newImpAddr, uint64_t* oldImpOut) {
-	// Resolve runtime symbols
-	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
-	uint64_t objc_getClassAddr = remoteDlSym(task, libObjcAddr, "_objc_getClass");
-	uint64_t sel_registerNameAddr = remoteDlSym(task, libObjcAddr, "_sel_registerName");
-	uint64_t class_getInstanceMethodAddr = remoteDlSym(task, libObjcAddr, "_class_getInstanceMethod");
-	uint64_t method_getImplementationAddr = remoteDlSym(task, libObjcAddr, "_method_getImplementation");
-	uint64_t method_setImplementationAddr = remoteDlSym(task, libObjcAddr, "_method_setImplementation");
-	uint64_t class_addMethodAddr = remoteDlSym(task, libObjcAddr, "_class_addMethod");
-	uint64_t method_getNameAddr = remoteDlSym(task, libObjcAddr, "_method_getName");
-	uint64_t method_getTypeEncodingAddr = remoteDlSym(task, libObjcAddr, "_method_getTypeEncoding");
-	uint64_t sel_isEqualAddr = remoteDlSym(task, libObjcAddr, "_sel_isEqual");
-	uint64_t class_getSuperclassAddr = remoteDlSym(task, libObjcAddr, "_class_getSuperclass");
-
-	if (!objc_getClassAddr || !sel_registerNameAddr || !class_getInstanceMethodAddr || !method_getImplementationAddr || !method_setImplementationAddr || !class_addMethodAddr || !method_getNameAddr || !method_getTypeEncodingAddr || !sel_isEqualAddr || !class_getSuperclassAddr) {
-		printf("[hookM_rop] Failed to resolve one or more objc runtime symbols!\n");
-		return 0;
-	}
-
-	// Write class and selector names into target
-	size_t classLen, selLen;
-	vm_address_t remoteClassName = writeStringToTask(task, className, &classLen);
-	vm_address_t remoteSelName = writeStringToTask(task, selName, &selLen);
-
-	// Get class pointer
-	uint64_t classPtr = 0;
-	arbCall(task, pthread, &classPtr, true, objc_getClassAddr, 1, remoteClassName);
-	if (!classPtr) {
-		printf("[hookM_rop] objc_getClass failed for %s\n", className);
-		goto cleanup;
-	}
-	printf("[hookM_rop] class %s found at 0x%llX\n", className, classPtr);
-
-	// Get selector pointer
-	uint64_t selPtr = 0;
-	arbCall(task, pthread, &selPtr, true, sel_registerNameAddr, 1, remoteSelName);
-	if (!selPtr) {
-		printf("[hookM_rop] sel_registerName failed for %s\n", selName);
-		goto cleanup;
-	}
-	printf("[hookM_rop] selector %s found at 0x%llX\n", selName, selPtr);
-
-	// Walk class hierarchy to find the method
-	uint64_t searchedClass = classPtr;
-	printf("[hookM_rop] Starting to search for method %s in class hierarchy of %s...\n", selName, className);
-
-	while (searchedClass) {
-		printf("[hookM_rop] Searching in class at 0x%llX\n", searchedClass);
-		
-		// Try to get the method from this class
-		uint64_t methodPtr = 0;
-		arbCall(task, pthread, &methodPtr, true, class_getInstanceMethodAddr, 2, searchedClass, selPtr);
-		
-		if (methodPtr) {
-			printf("[hookM_rop] Found method at 0x%llX\n", methodPtr);
-			
-			// Verify it's the right method by comparing selector
-			uint64_t foundSel = 0;
-			arbCall(task, pthread, &foundSel, true, method_getNameAddr, 1, methodPtr);
-			
-			uint64_t isEqual = 0;
-			arbCall(task, pthread, &isEqual, true, sel_isEqualAddr, 2, foundSel, selPtr);
-			
-			if (isEqual) {
-				printf("[hookM_rop] Confirmed: Found matching method for selector %s\n", selName);
-				
-				if (searchedClass == classPtr) {
-					// Method is in the original class - replace it
-					printf("[hookM_rop] Method found in original class, replacing IMP\n");
-					
-					// Get old implementation
-					uint64_t oldImp = 0;
-					arbCall(task, pthread, &oldImp, true, method_getImplementationAddr, 1, methodPtr);
-					printf("[hookM_rop] Old IMP: 0x%llX\n", oldImp);
-					
-					if (oldImpOut) {
-						*oldImpOut = oldImp;
-					}
-					
-					// Set new implementation
-					uint64_t setResult = 0;
-					arbCall(task, pthread, &setResult, true, method_setImplementationAddr, 2, methodPtr, newImpAddr);
-					printf("[hookM_rop] method_setImplementation returned: 0x%llX\n", setResult);
-					printf("[hookM_rop] Successfully replaced IMP\n");
-					
-					goto cleanup;
-				} else {
-					// Method is in superclass - add override to original class
-					printf("[hookM_rop] Method found in superclass at 0x%llX, adding override to original class\n", searchedClass);
-					
-					uint64_t typeEncoding = 0;
-					arbCall(task, pthread, &typeEncoding, true, method_getTypeEncodingAddr, 1, methodPtr);
-					printf("[hookM_rop] Method type encoding: 0x%llX\n", typeEncoding);
-					
-					uint64_t addResult = 0;
-					arbCall(task, pthread, &addResult, true, class_addMethodAddr, 4, classPtr, selPtr, newImpAddr, typeEncoding);
-					printf("[hookM_rop] class_addMethod returned: 0x%llX\n", addResult);
-					printf("[hookM_rop] Successfully added method override\n");
-					
-					goto cleanup;
-				}
-			}
-		}
-		
-		// Move to superclass
-		uint64_t superClass = 0;
-		arbCall(task, pthread, &superClass, true, class_getSuperclassAddr, 1, searchedClass);
-		
-		if (superClass == 0) {
-			printf("[hookM_rop] Reached NSObject, method not found\n");
-			break;
-		}
-		
-		printf("[hookM_rop] Moving to superclass at 0x%llX\n", superClass);
-		searchedClass = superClass;
-	}
-	
-	printf("[hookM_rop] Method %s not found in class hierarchy of %s\n", selName, className);
-
-cleanup:
-	if (remoteClassName) vm_deallocate(task, remoteClassName, classLen);
-	if (remoteSelName) vm_deallocate(task, remoteSelName, selLen);
-	return 1;
-}
-
-void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
-	// NSURLSessionDelegate - tạo stub properly
-	uint64_t completionBypassStub = writeSSLChallengeBypassStub(task);
-	if (!completionBypassStub) {
-		printf("[-] Failed to create SSL challenge bypass stub\n");
-		return;
-	}
-	
-	printf("[+] Created SSL challenge bypass stub at 0x%llX\n", completionBypassStub);
-	
-	// Hook các method quan trọng
-	hookM_rop_with_completion(task, pthread, allImageInfoAddr, "__NSCFLocalSessionTask", 
-		"_onqueue_didReceiveChallenge:request:withCompletion:", completionBypassStub, NULL);
-	
-	// hookM_rop_with_completion(task, pthread, allImageInfoAddr, "__NSCFTCPIOStreamTask", 
-	// 	"_onqueue_sendSessionChallenge:completionHandler:", completionBypassStub, NULL);
-}
-
 vm_address_t writeFakePSKIdentityStub(task_t task) {
     // const char* get_psk_identity(void* ssl) { return "fakePSKidentity"; }
     // Giả sử đã có hàm writeStringToTask
@@ -632,18 +465,31 @@ vm_address_t writeFakePSKIdentityStub(task_t task) {
 }
 
 vm_address_t writeCustomVerifyCallbackStub(task_t task) {
-    uint32_t stub[] = {
-        0xd2800000, // mov x0, #0
-        0xd65f03c0  // ret
-    };
-    vm_address_t remoteStub = 0;
-    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS) return 0;
-    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
-    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
-    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
-    return remoteStub;
+	// Allocate a marker in remote memory for logging
+	static vm_address_t log_marker_addr = 0;
+	if (!log_marker_addr) {
+		kern_return_t kr = vm_allocate(task, &log_marker_addr, 0x1000, VM_FLAGS_ANYWHERE);
+		if (kr != KERN_SUCCESS) log_marker_addr = 0;
+	}
+	// movz x1, #0xBEEF; str w1, [x0]; mov x0, #0; ret
+	// x0 = log_marker_addr
+	uint32_t stub[] = {
+		0x58000040, // ldr x0, #8
+		0xd28017a1, // movz x1, #0xbeef
+		0xb9000001, // str w1, [x0]
+		0xd2800000, // mov x0, #0
+		0xd65f03c0, // ret
+		(uint32_t)(log_marker_addr & 0xFFFFFFFF), (uint32_t)(log_marker_addr >> 32)
+	};
+	vm_address_t remoteStub = 0;
+	kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) return 0;
+	kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+	if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+	kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+	if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+	printf("[writeCustomVerifyCallbackStub] log_marker_addr = 0x%llx\n", (unsigned long long)log_marker_addr);
+	return remoteStub;
 }
 
 vm_address_t writeSetCustomVerifyWrapperStub(task_t task, uint64_t origFunc, vm_address_t customCallback) {
@@ -686,6 +532,7 @@ void patchFunctionEntry(task_t task, uint64_t funcAddr, vm_address_t newStub) {
     vm_write(task, funcAddr, (vm_address_t)&b_inst, 4);
 }
 
+
 void hook_ssl_custom_verify_patch(task_t task, vm_address_t allImageInfoAddr) {
     vm_address_t libssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
     if (!libssl) return;
@@ -697,17 +544,17 @@ void hook_ssl_custom_verify_patch(task_t task, vm_address_t allImageInfoAddr) {
     vm_address_t customCallback = writeCustomVerifyCallbackStub(task);
 
     if (set_custom_verify) {
-		printf("[hook_ssl_custom_verify_patch] Patching SSL_set_custom_verify");
+		printf("[hook_ssl_custom_verify_patch] Patching SSL_set_custom_verify\n");
         vm_address_t wrapper = writeSetCustomVerifyWrapperStub(task, set_custom_verify, customCallback);
         patchFunctionEntry(task, set_custom_verify, wrapper);
     }
     if (ctx_set_custom_verify) {
-		printf("[hook_ssl_custom_verify_patch] Patching SSL_CTX_set_custom_verify");
+		printf("[hook_ssl_custom_verify_patch] Patching SSL_CTX_set_custom_verify\n");
         vm_address_t wrapper = writeSetCustomVerifyWrapperStub(task, ctx_set_custom_verify, customCallback);
         patchFunctionEntry(task, ctx_set_custom_verify, wrapper);
     }
     if (get_psk_identity) {
-		printf("[hook_ssl_custom_verify_patch] Patching SSL_get_psk_identity");
+		printf("[hook_ssl_custom_verify_patch] Patching SSL_get_psk_identity\n");
         // Patch giống cũ: trả về chuỗi fake
         vm_address_t fakePSKStub = writeFakePSKIdentityStub(task);
         patchFunctionEntry(task, get_psk_identity, fakePSKStub);
@@ -726,53 +573,8 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	// sslkillswitch_rop_hooks(task, pthread, allImageInfoAddr);
 	hook_ssl_custom_verify_patch(task, allImageInfoAddr);
 	
-
-	// // Lấy base address của libobjc.A.dylib
-	// vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
-	// printf("libobjc.A.dylib base: 0x%llx\n", (unsigned long long)libObjcAddr);
-
-	// // Resolve địa chỉ hàm objc_copyClassList
-	// uint64_t objcCopyClassListAddr = remoteDlSym(task, libObjcAddr, "_objc_copyClassList");
-	// printf("objc_copyClassList address: 0x%llx\n", (unsigned long long)objcCopyClassListAddr);
-
-
-	// size_t remoteCountLen = sizeof(uint32_t);
-	// vm_address_t remoteCountPtr = 0;
-	// kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
-	// if (kr != KERN_SUCCESS) {
-	// 	printf("ERROR: Unable to allocate memory for count\n");
-	// 	return;
-	// }
-
-	// uint64_t classArrayPtr = 0;
-	// arbCall(task, pthread, &classArrayPtr, true, objcCopyClassListAddr, 1, remoteCountPtr);
-	// printf("[injectDylibViaRop] objc_copyClassList returned pointer: 0x%llx\n", classArrayPtr);
-
-	// uint32_t classCount = 0;
-	// vm_size_t outSize = 0;
-	// kr = vm_read_overwrite(task, remoteCountPtr, sizeof(classCount), (vm_address_t)&classCount, &outSize);
-	// printf("Number of classes: %u\n", classCount);
-
-	// for (uint32_t i = 0; i < classCount; i++) {
-	// 	uint64_t classPtr = 0;
-	// 	kr = vm_read_overwrite(task, classArrayPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&classPtr, &outSize);
-	// 	if (kr != KERN_SUCCESS) continue;
-
-	// 	// Gọi ROP để lấy tên class: class_getName
-	// 	uint64_t classGetNameAddr = remoteDlSym(task, libObjcAddr, "_class_getName");
-	// 	uint64_t namePtr = 0;
-	// 	arbCall(task, pthread, &namePtr, true, classGetNameAddr, 1, classPtr);
-
-	// 	if (namePtr) {
-	// 		char *className = task_copy_string(task, namePtr);
-	// 		printf("Class[%u]: %s\n", i, className ? className : "(null)");
-	// 		if (className) free(className);
-	// 	}
-	// }
-	// vm_deallocate(task, remoteCountPtr, remoteCountLen);
 
 	thread_terminate(pthread);
 }
