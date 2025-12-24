@@ -500,15 +500,6 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 
 	printf("[*] newImp direct address from remoteDlSym: 0x%llx\n", (uint64_t)newImp);
 
-#if __arm64e__
-	// For ARM64e with PAC, make the address callable
-	if (!(bootstrapThreadState.ts_64.__opaque_flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH)) {
-		newImp = (uint64_t)make_sym_callable((void*)newImp);
-		printf("[*] After PAC signing: 0x%llx\n", (uint64_t)newImp);
-	}
-#endif
-
-	// Thay thế implementation
 	uint64_t oldImpOut = 0;
 	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
 
