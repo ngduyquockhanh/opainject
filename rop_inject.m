@@ -649,7 +649,7 @@ vm_address_t writeFakePSKIdentityStub(task_t task) {
 }
 
 void hook_ssl_custom_verify(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr) {
-    vm_address_t libssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libssl.dylib");
+    vm_address_t libssl = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
     if (!libssl) return;
 
     uint64_t set_custom_verify = remoteDlSym(task, libssl, "_SSL_set_custom_verify");
@@ -661,12 +661,15 @@ void hook_ssl_custom_verify(task_t task, thread_act_t pthread, vm_address_t allI
 
     if (set_custom_verify) {
         // Thay thế implementation bằng verifyStub
+		printf("[hook_ssl_custom_verify] Hooking SSL_set_custom_verify with stub at 0x%llX\n", verifyStub);
         arbCall(task, pthread, NULL, false, set_custom_verify, 3, 0, 0, verifyStub);
     }
     if (ctx_set_custom_verify) {
+		printf("[hook_ssl_custom_verify] Hooking SSL_CTX_set_custom_verify with stub at 0x%llX\n", verifyStub);
         arbCall(task, pthread, NULL, false, ctx_set_custom_verify, 3, 0, 0, verifyStub);
     }
     if (get_psk_identity) {
+		printf("[hook_ssl_custom_verify] Hooking SSL_get_psk_identity with stub at 0x%llX\n", fakePSKStub);
         arbCall(task, pthread, NULL, false, get_psk_identity, 1, fakePSKStub);
     }
 }
