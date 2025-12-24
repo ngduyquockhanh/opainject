@@ -611,6 +611,26 @@ void sslkillswitch_rop_hooks(task_t task, thread_act_t pthread, vm_address_t all
 	// 	"_onqueue_sendSessionChallenge:completionHandler:", completionBypassStub, NULL);
 }
 
+vm_address_t writeFakePSKIdentityStub(task_t task) {
+    // const char* get_psk_identity(void* ssl) { return "fakePSKidentity"; }
+    // Giả sử đã có hàm writeStringToTask
+    size_t len;
+    vm_address_t remoteStr = writeStringToTask(task, "fakePSKidentity", &len);
+    uint32_t stub[] = {
+        0x58000040, // ldr x0, #8
+        0xd65f03c0, // ret
+        (uint32_t)(remoteStr & 0xFFFFFFFF), (uint32_t)(remoteStr >> 32)
+    };
+    vm_address_t remoteStub = 0;
+    kern_return_t kr = vm_allocate(task, &remoteStub, sizeof(stub), VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) return 0;
+    kr = vm_protect(task, remoteStub, sizeof(stub), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    kr = vm_write(task, remoteStub, (vm_address_t)stub, sizeof(stub));
+    if (kr != KERN_SUCCESS) { vm_deallocate(task, remoteStub, sizeof(stub)); return 0; }
+    return remoteStub;
+}
+
 vm_address_t writeCustomVerifyCallbackStub(task_t task) {
     uint32_t stub[] = {
         0xd2800000, // mov x0, #0
