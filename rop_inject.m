@@ -39,6 +39,7 @@
 #import "task_utils.h"
 #import "thread_utils.h"
 #import "arm64.h"
+#include <mach/vm_map.h>
 
 #define NSURLSessionAuthChallengeUseCredential 0
 #define NSURLSessionAuthChallengePerformDefaultHandling 1
