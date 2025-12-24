@@ -454,26 +454,44 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 
 	vm_address_t className = writeStringToTask(task, "__NSCFLocalSessionTask", NULL);
 	vm_address_t selName = writeStringToTask(task, "_onqueue_didReceiveChallenge:request:withCompletion:", NULL);
+	
 	printf("[+] Hooking _onqueue_didReceiveChallenge:request:withCompletion: of __NSCFLocalSessionTask\n");
 
 	uint64_t classPtr = 0;
 	arbCall(task, pthread, &classPtr, true, objc_getClass, 1, className);
+	if (!classPtr) {
+		printf("[!] objc_getClass failed to get __NSCFLocalSessionTask class!\n");
+		return;
+	}
 
 	uint64_t selPtr = 0;
 	arbCall(task, pthread, &selPtr, true, sel_registerName, 1, selName);
+	if (!selPtr) {
+		printf("[!] sel_registerName failed to get selector for _onqueue_didReceiveChallenge:request:withCompletion:!\n");
+		return;
+	}
 
 	uint64_t methodPtr = 0;
 	arbCall(task, pthread, &methodPtr, true, class_getInstanceMethod, 2, classPtr, selPtr);
+	if (!methodPtr) {
+		printf("[!] class_getInstanceMethod failed to get method for _onqueue_didReceiveChallenge:request:withCompletion:!\n");
+		return;
+	}
 
 	uint64_t oldImp = 0;
 	arbCall(task, pthread, &oldImp, true, method_getImplementation, 1, methodPtr);
+	if (!oldImp) {
+		printf("[!] method_getImplementation failed to get implementation for _onqueue_didReceiveChallenge:request:withCompletion:!\n");
+		return;
+	}
 
 	vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-	printf("[injectDylibViaRop] myDylibBase: 0x%lx\n", myDylibBase);
+	if (!myDylibBase) {
+		printf("[!] Could not find injected dylib in remote process!\n");
+		return;
+	}
 
 	uint64_t newImp = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
-	printf("[injectDylibViaRop] _my_entrypoint: 0x%lx\n", newImp);
-
 	if (!newImp) {
 		printf("[!] remoteDlSym không tìm thấy sslbypass_challenge_hook trong dylib!\n");
 		return;
