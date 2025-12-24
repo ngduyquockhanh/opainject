@@ -509,11 +509,12 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 
 	if (kr == KERN_SUCCESS) {
 		printf("[*] newImp 0x%llx nằm trong vùng nhớ:\n", (uint64_t)newImp);
-		printf("    Start: 0x%llx, Size: 0x%llx\n", address, size);
+		printf("    Start: 0x%llx, Size: 0x%llx\n", (unsigned long long)address, (unsigned long long)size);
 		printf("    Protection: 0x%x (current), 0x%x (max)\n", info.protection, info.max_protection);
-		printf("    Offset: 0x%llx, Object ID: 0x%x\n", info.offset, info.object_id);
+		printf("    Offset: 0x%llx, Object ID: 0x%x\n", (unsigned long long)info.offset, info.object_id);
 	} else {
 		printf("[!] vm_region_recurse failed: %s\n", mach_error_string(kr));
+	}
 	
 
 	// Thay thế implementation
