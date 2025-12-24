@@ -492,12 +492,6 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 		return;
 	}
 
-	uint64_t newImp = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
-	if (!newImp) {
-		printf("[!] remoteDlSym không tìm thấy sslbypass_challenge_hook trong dylib!\n");
-		return;
-	}
-
 	uint64_t newImpPointer = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
 	if (!newImpPointer) {
 		printf("[!] remoteDlSym could not find _new__NSCFLocalSessionTask__onqueue_didReceiveChallenge in dylib!\n");
