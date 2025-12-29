@@ -503,7 +503,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	// FIND OFFSETS
 	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_audited");
+	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_from");
 	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
 	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
@@ -514,7 +514,9 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	if(remoteDylibPath)
 	{
 		void* dlopenRet;
-		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
+		// Prepare addressInCaller for dlopen_from (third argument)
+		void* addressInCaller = NULL; // Set as needed, e.g., NULL or a valid address
+		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 3, remoteDylibPath, RTLD_NOW, addressInCaller);
 		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
 
 		if (dlopenRet) {
