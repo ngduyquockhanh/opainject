@@ -503,7 +503,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	// FIND OFFSETS
 	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
+	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_audited");
 	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
 	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
@@ -519,7 +519,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 		if (dlopenRet) {
 			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
-			hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
+			// hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
 		}
 		else {
 			uint64_t remoteErrorString = 0;
