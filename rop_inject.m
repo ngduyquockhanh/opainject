@@ -633,7 +633,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			{
 				printf("[injectDylibViaRop] failed to find __TEXT for %s after dlopen\n", dylibPath);
 			}
-			// hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
+			hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
 		}
 		else {
 			uint64_t remoteErrorString = 0;
