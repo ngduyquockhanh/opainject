@@ -3,7 +3,6 @@
 
 // === SSLKillSwitch ROP Hooks (Full) ===
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <string.h>
 #import <stdio.h>
 #import <unistd.h>
@@ -554,17 +553,17 @@ static bool detectPatchedDlopen(task_t task, vm_address_t dlopenAddr, vm_address
 
 static void logTextExecStatus(task_t task, vm_address_t textStart)
 {
-	mach_vm_address_t regionAddr = textStart;
-	mach_vm_size_t regionSize = 0;
+	vm_address_t regionAddr = textStart;
+	vm_size_t regionSize = 0;
 	vm_region_basic_info_data_64_t info;
 	mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
 	memory_object_name_t objectName = MACH_PORT_NULL;
-	kern_return_t kr = mach_vm_region(task, &regionAddr, &regionSize, VM_REGION_BASIC_INFO_64,
+	kern_return_t kr = vm_region_64(task, &regionAddr, &regionSize, VM_REGION_BASIC_INFO_64,
 							(vm_region_info_t)&info, &count, &objectName);
 	if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
 	if (kr != KERN_SUCCESS)
 	{
-		printf("[injectDylibViaRop] mach_vm_region failed: %s\n", mach_error_string(kr));
+		printf("[injectDylibViaRop] vm_region_64 failed: %s\n", mach_error_string(kr));
 		return;
 	}
 
