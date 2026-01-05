@@ -489,6 +489,91 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 	printf("[+] Hooked _onqueue_didReceiveChallenge:request:withCompletion:\n");
 }
 
+static bool getTextRange(task_t task, vm_address_t imageAddress, vm_address_t* textStartOut, vm_address_t* textEndOut)
+{
+	struct mach_header_64 mh = { 0 };
+	if (task_read(task, imageAddress, &mh, sizeof(mh)) != KERN_SUCCESS) return false;
+
+	vm_address_t slide = 0;
+	bool firstSegment = true;
+	vm_address_t lcCursor = imageAddress + sizeof(struct mach_header_64);
+	for (uint32_t i = 0; i < mh.ncmds; i++)
+	{
+		struct load_command lc = { 0 };
+		if (task_read(task, lcCursor, &lc, sizeof(lc)) != KERN_SUCCESS) break;
+		if (lc.cmd == LC_SEGMENT_64)
+		{
+			struct segment_command_64 seg = { 0 };
+			task_read(task, lcCursor, &seg, sizeof(seg));
+			if (firstSegment)
+			{
+				slide = imageAddress - seg.vmaddr;
+				firstSegment = false;
+			}
+			if (strncmp(seg.segname, "__TEXT", sizeof(seg.segname)) == 0)
+			{
+				vm_address_t textStart = seg.vmaddr + slide;
+				vm_address_t textEnd = textStart + seg.vmsize;
+				if (textStartOut) *textStartOut = textStart;
+				if (textEndOut) *textEndOut = textEnd;
+				return true;
+			}
+		}
+		lcCursor += lc.cmdsize;
+	}
+
+	return false;
+}
+
+static bool detectPatchedDlopen(task_t task, vm_address_t dlopenAddr, vm_address_t textStart, vm_address_t textEnd)
+{
+	uint32_t inst = 0;
+	if (task_read(task, dlopenAddr, &inst, sizeof(inst)) != KERN_SUCCESS)
+	{
+		printf("[injectDylibViaRop] failed to read dlopen_from prologue\n");
+		return false;
+	}
+
+	// Check for unconditional branch (B imm26). If it jumps outside libdyld __TEXT, likely trampoline/hook.
+	if ((inst & 0xFC000000) == 0x14000000)
+	{
+		int64_t imm26 = (int64_t)(inst & 0x03FFFFFF);
+		int64_t signedImm = (imm26 << 38) >> 38;
+		uint64_t target = dlopenAddr + (signedImm << 2);
+		bool outside = (target < textStart || target >= textEnd);
+		printf("[injectDylibViaRop] dlopen_from first inst branches to 0x%llX (%s)",
+			(unsigned long long)target,
+			outside ? "outside __TEXT -> suspicious" : "inside __TEXT");
+		printf("\n");
+		return outside;
+	}
+
+	return false;
+}
+
+static void logTextExecStatus(task_t task, vm_address_t textStart)
+{
+	mach_vm_address_t regionAddr = textStart;
+	mach_vm_size_t regionSize = 0;
+	vm_region_basic_info_data_64_t info;
+	mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+	memory_object_name_t objectName = MACH_PORT_NULL;
+	kern_return_t kr = mach_vm_region(task, &regionAddr, &regionSize, VM_REGION_BASIC_INFO_64,
+							(vm_region_info_t)&info, &count, &objectName);
+	if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
+	if (kr != KERN_SUCCESS)
+	{
+		printf("[injectDylibViaRop] mach_vm_region failed: %s\n", mach_error_string(kr));
+		return;
+	}
+
+	bool hasExec = (info.protection & VM_PROT_EXECUTE);
+	printf("[injectDylibViaRop] text region prot=0x%x exec=%s size=0x%llX\n",
+		info.protection,
+		hasExec ? "yes" : "no",
+		(unsigned long long)regionSize);
+}
+
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 {
 	prepareForMagic(task, allImageInfoAddr);
@@ -506,6 +591,16 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_from");
 	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
+	vm_address_t libDyldTextStart = 0, libDyldTextEnd = 0;
+	if (getTextRange(task, libDyldAddr, &libDyldTextStart, &libDyldTextEnd))
+	{
+		detectPatchedDlopen(task, dlopenAddr, libDyldTextStart, libDyldTextEnd);
+	}
+	else
+	{
+		printf("[injectDylibViaRop] failed to locate libdyld __TEXT range\n");
+	}
+
 	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
 
 	// CALL DLOPEN
@@ -521,6 +616,17 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 		if (dlopenRet) {
 			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+
+			vm_address_t loadedBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
+			vm_address_t textStart = 0, textEnd = 0;
+			if (loadedBase && getTextRange(task, loadedBase, &textStart, &textEnd))
+			{
+				logTextExecStatus(task, textStart);
+			}
+			else
+			{
+				printf("[injectDylibViaRop] failed to find __TEXT for %s after dlopen\n", dylibPath);
+			}
 			// hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
 		}
 		else {
