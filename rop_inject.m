@@ -483,6 +483,12 @@ void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t 
 		return;
 	}
 
+	printf("[hook_NSURLSessionChallenge] newImp raw: 0x%llX\n", newImp);
+	#if __arm64e__
+	newImp = (uint64_t)make_sym_callable((void*)newImp);
+	printf("[hook_NSURLSessionChallenge] newImp after PAC wrap: 0x%llX\n", newImp);
+	#endif
+
 	uint64_t oldImpOut = 0;
 	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
 
