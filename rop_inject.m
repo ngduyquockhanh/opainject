@@ -3,6 +3,7 @@
 
 // === SSLKillSwitch ROP Hooks (Full) ===
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <string.h>
 #import <stdio.h>
 #import <unistd.h>
