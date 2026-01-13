@@ -127,7 +127,7 @@ void* ssl_monitor_thread(void *arg) {
             
             if (kr == KERN_SUCCESS) {
                 // Check if PC at breakpoint (ssl_write)
-                uint64_t pc = thread_state.__pc;
+                uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(thread_state);
                 
                 if (pc == state->ssl_write_addr) {
                     pthread_mutex_lock(&state->lock);
