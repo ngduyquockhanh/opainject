@@ -221,12 +221,27 @@ void start_ssl_write_monitor(task_t task, uint64_t ssl_write_addr) {
     // Set breakpoint at ssl_write (replace first instruction with BRK #0)
     uint8_t brk_instr[] = {0x00, 0x00, 0x20, 0xd4};  // BRK #0 instruction
     
-    kern_return_t kr = vm_write(task, ssl_write_addr, (vm_offset_t)brk_instr, sizeof(brk_instr));
+    // First, make the memory writable
+    kern_return_t kr = vm_protect(task, ssl_write_addr, sizeof(brk_instr), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        printf("[ERROR] Failed to change memory protection: %s\n", mach_error_string(kr));
+        free(g_ssl_monitor);
+        g_ssl_monitor = NULL;
+        return;
+    }
+    
+    kr = vm_write(task, ssl_write_addr, (vm_offset_t)brk_instr, sizeof(brk_instr));
     if (kr != KERN_SUCCESS) {
         printf("[ERROR] Failed to set breakpoint: %s\n", mach_error_string(kr));
         free(g_ssl_monitor);
         g_ssl_monitor = NULL;
         return;
+    }
+    
+    // Restore executable permissions
+    kr = vm_protect(task, ssl_write_addr, sizeof(brk_instr), FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        printf("[WARNING] Failed to restore memory protection: %s\n", mach_error_string(kr));
     }
     
     printf("[+] Breakpoint set at 0x%llx\n", ssl_write_addr);
