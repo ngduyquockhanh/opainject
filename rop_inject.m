@@ -241,7 +241,8 @@ void start_ssl_write_monitor(task_t task, uint64_t ssl_write_addr) {
         return;
     }
     
-    printf("[+] Monitor thread created (tid: %lu)\n", monitor_tid);
+    printf("[+] Monitor thread created (tid: %p)\n", (void*)monitor_tid);
+
     printf("[+] ssl_write monitoring active!\n");
 }
 
@@ -278,7 +279,7 @@ void monitorSSLWriteInTarget(task_t task, pid_t pid, vm_address_t allImageInfoAd
 		return;
 	}
 
-	printf("[+] libboringssl found at 0x%llx\n", libBorringSSL);
+	printf("[+] libboringssl found at 0x%lx\n", libBorringSSL);
 	printf("[+] SSL_write found at 0x%llx\n", sslWriteAddr);
 
 	// Start monitoring
