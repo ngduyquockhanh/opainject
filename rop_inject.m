@@ -430,156 +430,6 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 }
 
 
-void hook_NSURLSessionChallenge(task_t task, thread_act_t pthread, vm_address_t allImageInfoAddr, const char* dylibPath) {
-	vm_address_t libobjc = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
-	uint64_t objc_getClass = remoteDlSym(task, libobjc, "_objc_getClass");
-	uint64_t sel_registerName = remoteDlSym(task, libobjc, "_sel_registerName");
-	uint64_t class_getInstanceMethod = remoteDlSym(task, libobjc, "_class_getInstanceMethod");
-	uint64_t method_getImplementation = remoteDlSym(task, libobjc, "_method_getImplementation");
-	uint64_t method_setImplementation = remoteDlSym(task, libobjc, "_method_setImplementation");
-
-	vm_address_t className = writeStringToTask(task, "__NSCFLocalSessionTask", NULL);
-	vm_address_t selName = writeStringToTask(task, "_onqueue_didReceiveChallenge:request:withCompletion:", NULL);
-	
-	printf("[+] Hooking _onqueue_didReceiveChallenge:request:withCompletion: of __NSCFLocalSessionTask\n");
-
-	uint64_t classPtr = 0;
-	arbCall(task, pthread, &classPtr, true, objc_getClass, 1, className);
-	if (!classPtr) {
-		printf("[!] objc_getClass failed to get __NSCFLocalSessionTask class!\n");
-		return;
-	}
-
-	uint64_t selPtr = 0;
-	arbCall(task, pthread, &selPtr, true, sel_registerName, 1, selName);
-	if (!selPtr) {
-		printf("[!] sel_registerName failed to get selector for _onqueue_didReceiveChallenge:request:withCompletion:!\n");
-		return;
-	}
-
-	uint64_t methodPtr = 0;
-	arbCall(task, pthread, &methodPtr, true, class_getInstanceMethod, 2, classPtr, selPtr);
-	if (!methodPtr) {
-		printf("[!] class_getInstanceMethod failed to get method for _onqueue_didReceiveChallenge:request:withCompletion:!\n");
-		return;
-	}
-
-	uint64_t oldImp = 0;
-	arbCall(task, pthread, &oldImp, true, method_getImplementation, 1, methodPtr);
-	if (!oldImp) {
-		printf("[!] method_getImplementation failed to get implementation for _onqueue_didReceiveChallenge:request:withCompletion:!\n");
-		return;
-	}
-
-	vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-	if (!myDylibBase) {
-		printf("[!] Could not find injected dylib in remote process!\n");
-		return;
-	}
-
-	uint64_t newImp = remoteDlSym(task, myDylibBase, "_new__NSCFLocalSessionTask__onqueue_didReceiveChallenge");
-	if (!newImp) {
-		printf("[!] Could not find _new__NSCFLocalSessionTask__onqueue_didReceiveChallenge in dylib!\n");
-		return;
-	}
-
-	printf("[hook_NSURLSessionChallenge] newImp raw: 0x%llX\n", newImp);
-	#if __arm64e__
-	newImp = (uint64_t)make_sym_callable((void*)newImp);
-	printf("[hook_NSURLSessionChallenge] newImp after PAC wrap: 0x%llX\n", newImp);
-	#endif
-
-	uint64_t oldImpOut = 0;
-	arbCall(task, pthread, &oldImpOut, true, method_setImplementation, 2, methodPtr, newImp);
-
-	printf("[+] Hooked _onqueue_didReceiveChallenge:request:withCompletion:\n");
-}
-
-static bool getTextRange(task_t task, vm_address_t imageAddress, vm_address_t* textStartOut, vm_address_t* textEndOut)
-{
-	struct mach_header_64 mh = { 0 };
-	if (task_read(task, imageAddress, &mh, sizeof(mh)) != KERN_SUCCESS) return false;
-
-	vm_address_t slide = 0;
-	bool firstSegment = true;
-	vm_address_t lcCursor = imageAddress + sizeof(struct mach_header_64);
-	for (uint32_t i = 0; i < mh.ncmds; i++)
-	{
-		struct load_command lc = { 0 };
-		if (task_read(task, lcCursor, &lc, sizeof(lc)) != KERN_SUCCESS) break;
-		if (lc.cmd == LC_SEGMENT_64)
-		{
-			struct segment_command_64 seg = { 0 };
-			task_read(task, lcCursor, &seg, sizeof(seg));
-			if (firstSegment)
-			{
-				slide = imageAddress - seg.vmaddr;
-				firstSegment = false;
-			}
-			if (strncmp(seg.segname, "__TEXT", sizeof(seg.segname)) == 0)
-			{
-				vm_address_t textStart = seg.vmaddr + slide;
-				vm_address_t textEnd = textStart + seg.vmsize;
-				if (textStartOut) *textStartOut = textStart;
-				if (textEndOut) *textEndOut = textEnd;
-				return true;
-			}
-		}
-		lcCursor += lc.cmdsize;
-	}
-
-	return false;
-}
-
-static bool detectPatchedDlopen(task_t task, vm_address_t dlopenAddr, vm_address_t textStart, vm_address_t textEnd)
-{
-	uint32_t inst = 0;
-	if (task_read(task, dlopenAddr, &inst, sizeof(inst)) != KERN_SUCCESS)
-	{
-		printf("[injectDylibViaRop] failed to read dlopen_from prologue\n");
-		return false;
-	}
-
-	// Check for unconditional branch (B imm26). If it jumps outside libdyld __TEXT, likely trampoline/hook.
-	if ((inst & 0xFC000000) == 0x14000000)
-	{
-		int64_t imm26 = (int64_t)(inst & 0x03FFFFFF);
-		int64_t signedImm = (imm26 << 38) >> 38;
-		uint64_t target = dlopenAddr + (signedImm << 2);
-		bool outside = (target < textStart || target >= textEnd);
-		printf("[injectDylibViaRop] dlopen_from first inst branches to 0x%llX (%s)",
-			(unsigned long long)target,
-			outside ? "outside __TEXT -> suspicious" : "inside __TEXT");
-		printf("\n");
-		return outside;
-	}
-
-	return false;
-}
-
-static void logTextExecStatus(task_t task, vm_address_t textStart)
-{
-	vm_address_t regionAddr = textStart;
-	vm_size_t regionSize = 0;
-	vm_region_basic_info_data_64_t info;
-	mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-	memory_object_name_t objectName = MACH_PORT_NULL;
-	kern_return_t kr = vm_region_64(task, &regionAddr, &regionSize, VM_REGION_BASIC_INFO_64,
-							(vm_region_info_t)&info, &count, &objectName);
-	if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
-	if (kr != KERN_SUCCESS)
-	{
-		printf("[injectDylibViaRop] vm_region_64 failed: %s\n", mach_error_string(kr));
-		return;
-	}
-
-	bool hasExec = (info.protection & VM_PROT_EXECUTE);
-	printf("[injectDylibViaRop] text region prot=0x%x exec=%s size=0x%llX\n",
-		info.protection,
-		hasExec ? "yes" : "no",
-		(unsigned long long)regionSize);
-}
-
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 {
 	prepareForMagic(task, allImageInfoAddr);
@@ -592,57 +442,43 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	// FIND OFFSETS
-	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_from");
-	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
+	vm_address_t libBorringSSL = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
+	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "SSL_write");
 
-	vm_address_t libDyldTextStart = 0, libDyldTextEnd = 0;
-	if (getTextRange(task, libDyldAddr, &libDyldTextStart, &libDyldTextEnd))
-	{
-		detectPatchedDlopen(task, dlopenAddr, libDyldTextStart, libDyldTextEnd);
-	}
-	else
-	{
-		printf("[injectDylibViaRop] failed to locate libdyld __TEXT range\n");
-	}
+	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 
-	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
+	// // FIND OFFSETS
+	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
+	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_from");
+	// uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
-	// CALL DLOPEN
-	size_t remoteDylibPathSize = 0;
-	vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
-	if(remoteDylibPath)
-	{
-		void* dlopenRet;
-		// Prepare addressInCaller for dlopen_from (third argument)
-		void* addressInCaller = NULL; // Set as needed, e.g., NULL or a valid address
-		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 3, remoteDylibPath, RTLD_NOW, addressInCaller);
-		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
+	// vm_address_t libDyldTextStart = 0, libDyldTextEnd = 0;
 
-		if (dlopenRet) {
-			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+	// printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
 
-			vm_address_t loadedBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
-			vm_address_t textStart = 0, textEnd = 0;
-			if (loadedBase && getTextRange(task, loadedBase, &textStart, &textEnd))
-			{
-				logTextExecStatus(task, textStart);
-			}
-			else
-			{
-				printf("[injectDylibViaRop] failed to find __TEXT for %s after dlopen\n", dylibPath);
-			}
-			hook_NSURLSessionChallenge(task, pthread, allImageInfoAddr, dylibPath);
-		}
-		else {
-			uint64_t remoteErrorString = 0;
-			arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
-			char *errorString = task_copy_string(task, remoteErrorString);
-			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
-			free(errorString);
-		}
-	}
+	// // CALL DLOPEN
+	// size_t remoteDylibPathSize = 0;
+	// vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
+	// if(remoteDylibPath)
+	// {
+	// 	void* dlopenRet;
+	// 	// Prepare addressInCaller for dlopen_from (third argument)
+	// 	void* addressInCaller = NULL; // Set as needed, e.g., NULL or a valid address
+	// 	arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 3, remoteDylibPath, RTLD_NOW, addressInCaller);
+	// 	vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
+
+	// 	if (dlopenRet) {
+	// 		printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+
+	// 	}
+	// 	else {
+	// 		uint64_t remoteErrorString = 0;
+	// 		arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
+	// 		char *errorString = task_copy_string(task, remoteErrorString);
+	// 		printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
+	// 		free(errorString);
+	// 	}
+	// }
 
 	thread_terminate(pthread);
 }
