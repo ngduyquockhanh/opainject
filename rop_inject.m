@@ -42,6 +42,251 @@
 #import "arm64.h"
 #include <mach/vm_map.h>
 
+// Hook Objective-C method in remote process using ROP, similar to hookM
+// Monitor ssl_write using breakpoint + monitor thread
+// Returns 1 if success, 0 if fail
+
+#include <mach/mach.h>
+#include <string.h>
+#import <stdio.h>
+#import <unistd.h>
+#import <stdlib.h>
+#import <dlfcn.h>
+#import <errno.h>
+#import <string.h>
+#import <limits.h>
+#import <pthread.h>
+#import <pthread_spis.h>
+#import <mach/mach.h>
+#import <mach/error.h>
+#import <mach-o/getsect.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#import <mach-o/nlist.h>
+#import <mach-o/reloc.h>
+#import <mach-o/dyld_images.h>
+#import <sys/utsname.h>
+#import <sys/types.h>
+#import <sys/sysctl.h>
+#import <sys/mman.h>
+#import <sys/stat.h>
+#import <sys/wait.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <Foundation/Foundation.h>
+#import <Security/Security.h>
+#import <objc/runtime.h>
+#include <libkern/OSCacheControl.h>
+
+#import "pac.h"
+#import "dyld.h"
+#import "sandbox.h"
+#import "CoreSymbolication.h"
+#import "task_utils.h"
+#import "thread_utils.h"
+#import "arm64.h"
+#include <mach/vm_map.h>
+
+// ============ SSL Write Monitor ============
+
+typedef struct {
+    task_t task;
+    uint64_t ssl_write_addr;
+    bool running;
+    pthread_mutex_t lock;
+    uint64_t call_count;
+} ssl_monitor_state_t;
+
+ssl_monitor_state_t *g_ssl_monitor = NULL;
+
+// Monitor thread - chờ breakpoint hit
+void* ssl_monitor_thread(void *arg) {
+    ssl_monitor_state_t *state = (ssl_monitor_state_t *)arg;
+    
+    printf("[ssl_monitor_thread] Started monitoring\n");
+    
+    while (state->running) {
+        thread_t *threads;
+        mach_msg_type_number_t thread_count;
+        
+        // Get all threads
+        kern_return_t kr = task_threads(state->task, &threads, &thread_count);
+        if (kr != KERN_SUCCESS) {
+            usleep(50000);
+            continue;
+        }
+        
+        for (mach_msg_type_number_t i = 0; i < thread_count; i++) {
+            // Suspend thread to safely read state
+            thread_suspend(threads[i]);
+            
+            arm_thread_state64_t thread_state;
+            mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
+            
+            kr = thread_get_state(threads[i], ARM_THREAD_STATE64,
+                                 (thread_state_t)&thread_state, &state_count);
+            
+            if (kr == KERN_SUCCESS) {
+                // Check if PC at breakpoint (ssl_write)
+                uint64_t pc = thread_state.__pc;
+                
+                if (pc == state->ssl_write_addr) {
+                    pthread_mutex_lock(&state->lock);
+                    state->call_count++;
+                    uint64_t call_num = state->call_count;
+                    pthread_mutex_unlock(&state->lock);
+                    
+                    printf("\n");
+                    printf("╔════════════════════════════════════════╗\n");
+                    printf("║  ssl_write INTERCEPTED (#%lld)         ║\n", call_num);
+                    printf("╚════════════════════════════════════════╝\n");
+                    
+                    // Read arguments from registers
+                    uint64_t ssl_ptr = thread_state.__x[0];      // x0 = SSL*
+                    uint64_t buf_ptr = thread_state.__x[1];      // x1 = buf
+                    uint32_t buf_len = thread_state.__x[2];      // x2 = len
+                    
+                    printf("[+] Thread ID: %d\n", threads[i]);
+                    printf("[+] x0 (SSL*):  0x%llx\n", ssl_ptr);
+                    printf("[+] x1 (buf):   0x%llx\n", buf_ptr);
+                    printf("[+] x2 (len):   %d (0x%x)\n", buf_len, buf_len);
+                    
+                    // Read buffer content from remote process
+                    if (buf_len > 0 && buf_len < 0x1000000) {
+                        uint8_t *buf_data = malloc(buf_len);
+                        vm_size_t actual_size = buf_len;
+                        
+                        kr = vm_read_overwrite(state->task, buf_ptr, buf_len,
+                                              (vm_address_t)buf_data, &actual_size);
+                        
+                        if (kr == KERN_SUCCESS && actual_size > 0) {
+                            // Print hex dump
+                            printf("\n[HEX] Buffer content (first %zu bytes):\n", 
+                                   actual_size > 200 ? 200 : actual_size);
+                            for (vm_size_t j = 0; j < actual_size && j < 200; j++) {
+                                printf("%02x ", buf_data[j]);
+                                if ((j + 1) % 16 == 0) printf("\n");
+                            }
+                            printf("\n");
+                            
+                            // Print ASCII dump
+                            printf("\n[ASCII] Readable content:\n");
+                            for (vm_size_t j = 0; j < actual_size && j < 200; j++) {
+                                uint8_t c = buf_data[j];
+                                if (c >= 32 && c < 127) {
+                                    printf("%c", c);
+                                } else {
+                                    printf(".");
+                                }
+                            }
+                            printf("\n");
+                        } else if (kr != KERN_SUCCESS) {
+                            printf("[ERROR] Failed to read buffer: %s\n", mach_error_string(kr));
+                        }
+                        
+                        free(buf_data);
+                    } else {
+                        printf("[!] Buffer length invalid or too large: %d\n", buf_len);
+                    }
+                    
+                    printf("\n");
+                }
+            }
+            
+            // Resume thread
+            thread_resume(threads[i]);
+        }
+        
+        vm_deallocate(mach_task_self(), (vm_address_t)threads,
+                     thread_count * sizeof(thread_t));
+        
+        usleep(50000);  // Poll every 50ms
+    }
+    
+    printf("[ssl_monitor_thread] Monitor stopped\n");
+    return NULL;
+}
+
+// Setup ssl_write monitoring
+void start_ssl_write_monitor(task_t task, uint64_t ssl_write_addr) {
+    printf("[*] Starting ssl_write monitor at 0x%llx\n", ssl_write_addr);
+    
+    // Allocate monitor state
+    g_ssl_monitor = malloc(sizeof(ssl_monitor_state_t));
+    g_ssl_monitor->task = task;
+    g_ssl_monitor->ssl_write_addr = ssl_write_addr;
+    g_ssl_monitor->running = true;
+    g_ssl_monitor->call_count = 0;
+    pthread_mutex_init(&g_ssl_monitor->lock, NULL);
+    
+    // Set breakpoint at ssl_write (replace first instruction with BRK #0)
+    uint8_t brk_instr[] = {0x00, 0x00, 0x20, 0xd4};  // BRK #0 instruction
+    
+    kern_return_t kr = vm_write(task, ssl_write_addr, (vm_offset_t)brk_instr, sizeof(brk_instr));
+    if (kr != KERN_SUCCESS) {
+        printf("[ERROR] Failed to set breakpoint: %s\n", mach_error_string(kr));
+        free(g_ssl_monitor);
+        g_ssl_monitor = NULL;
+        return;
+    }
+    
+    printf("[+] Breakpoint set at 0x%llx\n", ssl_write_addr);
+    
+    // Start monitor thread
+    pthread_t monitor_tid;
+    int pthread_kr = pthread_create(&monitor_tid, NULL, ssl_monitor_thread, g_ssl_monitor);
+    if (pthread_kr != 0) {
+        printf("[ERROR] Failed to create monitor thread: %d\n", pthread_kr);
+        free(g_ssl_monitor);
+        g_ssl_monitor = NULL;
+        return;
+    }
+    
+    printf("[+] Monitor thread created (tid: %lu)\n", monitor_tid);
+    printf("[+] ssl_write monitoring active!\n");
+}
+
+// Stop monitoring
+void stop_ssl_write_monitor() {
+    if (g_ssl_monitor) {
+        printf("[*] Stopping ssl_write monitor...\n");
+        g_ssl_monitor->running = false;
+        usleep(200000);
+        
+        pthread_mutex_destroy(&g_ssl_monitor->lock);
+        printf("[+] Monitor stopped. Total calls: %lld\n", g_ssl_monitor->call_count);
+        
+        free(g_ssl_monitor);
+        g_ssl_monitor = NULL;
+    }
+}
+
+void monitorSSLWriteInTarget(task_t task, pid_t pid, vm_address_t allImageInfoAddr)
+{
+	printf("[monitorSSLWriteInTarget] Starting SSL write monitoring\n");
+
+	// Find libboringssl
+	vm_address_t libBorringSSL = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
+	if (!libBorringSSL) {
+		printf("[ERROR] Failed to find libboringssl.dylib\n");
+		return;
+	}
+
+	// Find ssl_write function
+	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "_SSL_write");
+	if (!sslWriteAddr) {
+		printf("[ERROR] Failed to find SSL_write\n");
+		return;
+	}
+
+	printf("[+] libboringssl found at 0x%llx\n", libBorringSSL);
+	printf("[+] SSL_write found at 0x%llx\n", sslWriteAddr);
+
+	// Start monitoring
+	start_ssl_write_monitor(task, sslWriteAddr);
+
+	printf("[+] Monitor is running! Press Ctrl+C to stop...\n");
+	printf("[+] Any calls to ssl_write will be intercepted and logged\n");
+}
 
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
@@ -430,206 +675,6 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
-kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteAddr, vm_address_t allImageInfoAddr)
-{
-    kern_return_t kr = KERN_SUCCESS;
-    
-    // 1. Backup original instructions (first 16 bytes = 4 instructions)
-    uint32_t originalInsts[4];
-    kr = task_read(task, sslWriteAddr, originalInsts, sizeof(originalInsts));
-    if (kr != KERN_SUCCESS) {
-        printf("[hookSSLWrite] ERROR: Failed to read original instructions: %s\n", mach_error_string(kr));
-        return kr;
-    }
-    
-    printf("[hookSSLWrite] Original instructions backed up\n");
-    
-    // 2. Allocate memory for hook shellcode
-    vm_address_t hookShellcode = (vm_address_t)NULL;
-    size_t shellcodeSize = 0x2000; // 8KB
-    kr = vm_allocate(task, &hookShellcode, shellcodeSize, VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS) {
-        printf("[hookSSLWrite] ERROR: Failed to allocate hook memory: %s\n", mach_error_string(kr));
-        return kr;
-    }
-    
-    kr = vm_protect(task, hookShellcode, shellcodeSize, TRUE, VM_PROT_READ | VM_PROT_WRITE);
-    if (kr != KERN_SUCCESS) {
-        vm_deallocate(task, hookShellcode, shellcodeSize);
-        printf("[hookSSLWrite] ERROR: Failed to make hook memory writable: %s\n", mach_error_string(kr));
-        return kr;
-    }
-    
-    // 3. Get printf address for logging
-    vm_address_t libSystemCAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_c.dylib");
-    uint64_t printfAddr = remoteDlSym(task, libSystemCAddr, "_printf");
-    
-    printf("[hookSSLWrite] printf at 0x%llX\n", printfAddr);
-    
-    // 4. Create format strings in remote process
-    const char* formatStr = "[SSL_write HOOK] ssl=%p, buf=%p, num=%d, data=%.256s\n";
-    size_t formatStrSize = 0;
-    vm_address_t remoteFormatStr = writeStringToTask(task, formatStr, &formatStrSize);
-    
-    // 5. Build hook shellcode
-    uint64_t hookAddr = hookShellcode;
-    uint64_t trampolineAddr = hookShellcode + 0x1000; // Trampoline at offset 0x1000
-    
-    // Hook shellcode ARM64 instructions
-    uint32_t hookCode[64];
-    int idx = 0;
-    
-    // Save registers we'll use
-    hookCode[idx++] = 0xa9bf7bfd; // stp x29, x30, [sp, #-0x10]!
-    hookCode[idx++] = 0xa9bf73fb; // stp x27, x28, [sp, #-0x10]!
-    hookCode[idx++] = 0xa9bf6bf9; // stp x25, x26, [sp, #-0x10]!
-    hookCode[idx++] = 0xa9bf63f7; // stp x23, x24, [sp, #-0x10]!
-    hookCode[idx++] = 0xa9bf5bf5; // stp x21, x22, [sp, #-0x10]!
-    hookCode[idx++] = 0xa9bf53f3; // stp x19, x20, [sp, #-0x10]!
-    
-    // Backup SSL_write arguments (x0, x1, x2)
-    hookCode[idx++] = 0xaa0003f3; // mov x19, x0 (ssl)
-    hookCode[idx++] = 0xaa0103f4; // mov x20, x1 (buf)
-    hookCode[idx++] = 0xaa0203f5; // mov x21, x2 (num)
-    
-    // Load format string address into x0
-    hookCode[idx++] = 0xd2800000 | ((remoteFormatStr & 0xFFFF) << 5); // movz x0, #imm
-    hookCode[idx++] = generate_movk(0, (remoteFormatStr >> 16) & 0xFFFF, 16);
-    hookCode[idx++] = generate_movk(0, (remoteFormatStr >> 32) & 0xFFFF, 32);
-    hookCode[idx++] = generate_movk(0, (remoteFormatStr >> 48) & 0xFFFF, 48);
-    
-    // Setup printf arguments
-    hookCode[idx++] = 0xaa1303e1; // mov x1, x19 (ssl)
-    hookCode[idx++] = 0xaa1403e2; // mov x2, x20 (buf)
-    hookCode[idx++] = 0xaa1503e3; // mov x3, x21 (num)
-    hookCode[idx++] = 0xaa1403e4; // mov x4, x20 (buf for string)
-    
-    // Load printf address and call it
-    hookCode[idx++] = 0xd2800009 | ((printfAddr & 0xFFFF) << 5);
-    hookCode[idx++] = generate_movk(9, (printfAddr >> 16) & 0xFFFF, 16);
-    hookCode[idx++] = generate_movk(9, (printfAddr >> 32) & 0xFFFF, 32);
-    hookCode[idx++] = generate_movk(9, (printfAddr >> 48) & 0xFFFF, 48);
-    hookCode[idx++] = 0xd63f0120; // blr x9
-    
-    // Restore original arguments
-    hookCode[idx++] = 0xaa1303e0; // mov x0, x19
-    hookCode[idx++] = 0xaa1403e1; // mov x1, x20
-    hookCode[idx++] = 0xaa1503e2; // mov x2, x21
-    
-    // Restore registers
-    hookCode[idx++] = 0xa8c153f3; // ldp x19, x20, [sp], #0x10
-    hookCode[idx++] = 0xa8c15bf5; // ldp x21, x22, [sp], #0x10
-    hookCode[idx++] = 0xa8c163f7; // ldp x23, x24, [sp], #0x10
-    hookCode[idx++] = 0xa8c16bf9; // ldp x25, x26, [sp], #0x10
-    hookCode[idx++] = 0xa8c173fb; // ldp x27, x28, [sp], #0x10
-    hookCode[idx++] = 0xa8c17bfd; // ldp x29, x30, [sp], #0x10
-    
-    // Jump to trampoline
-    int64_t toTrampoline = ((int64_t)trampolineAddr - (int64_t)(hookAddr + idx * 4)) / 4;
-    hookCode[idx++] = 0x14000000 | (toTrampoline & 0x3FFFFFF); // b trampoline
-    
-    // Write hook shellcode to remote process
-    kr = vm_write(task, hookShellcode, (vm_address_t)hookCode, idx * sizeof(uint32_t));
-    if (kr != KERN_SUCCESS) {
-        printf("[hookSSLWrite] ERROR: Failed to write hook code: %s\n", mach_error_string(kr));
-        vm_deallocate(task, hookShellcode, shellcodeSize);
-        vm_deallocate(task, remoteFormatStr, formatStrSize);
-        return kr;
-    }
-    
-    // 6. Build trampoline (original instructions + jump back to SSL_write+16)
-    uint32_t trampolineCode[16];
-    int tIdx = 0;
-    
-    // Copy original 4 instructions
-    trampolineCode[tIdx++] = originalInsts[0];
-    trampolineCode[tIdx++] = originalInsts[1];
-    trampolineCode[tIdx++] = originalInsts[2];
-    trampolineCode[tIdx++] = originalInsts[3];
-    
-    // Load address of SSL_write+16 and jump there
-    uint64_t returnAddr = sslWriteAddr + 16;
-    trampolineCode[tIdx++] = 0xd2800010 | ((returnAddr & 0xFFFF) << 5);
-    trampolineCode[tIdx++] = generate_movk(16, (returnAddr >> 16) & 0xFFFF, 16);
-    trampolineCode[tIdx++] = generate_movk(16, (returnAddr >> 32) & 0xFFFF, 32);
-    trampolineCode[tIdx++] = generate_movk(16, (returnAddr >> 48) & 0xFFFF, 48);
-    trampolineCode[tIdx++] = generate_br(16); // br x16
-    
-    kr = vm_write(task, trampolineAddr, (vm_address_t)trampolineCode, tIdx * sizeof(uint32_t));
-    if (kr != KERN_SUCCESS) {
-        printf("[hookSSLWrite] ERROR: Failed to write trampoline: %s\n", mach_error_string(kr));
-        vm_deallocate(task, hookShellcode, shellcodeSize);
-        vm_deallocate(task, remoteFormatStr, formatStrSize);
-        return kr;
-    }
-    
-    // 7. Patch SSL_write to jump to hook (using absolute address)
-    // We'll use x16 as scratch register (IP0 - safe to clobber)
-    uint32_t patchInsts[4];
-    // ldr x16, #8 (load from PC+8, which is after these 4 instructions)
-    patchInsts[0] = 0x58000050; // ldr x16, #8
-    patchInsts[1] = 0xd61f0200; // br x16
-    // Following 8 bytes will be the hook address (stored as data)
-    // But we can only patch 4 instructions, so use movz/movk instead:
-    
-    // Alternative: Use movz/movk to load hook address into x16
-    patchInsts[0] = 0xd2800010 | ((hookAddr & 0xFFFF) << 5); // movz x16, #imm
-    patchInsts[1] = generate_movk(16, (hookAddr >> 16) & 0xFFFF, 16);
-    patchInsts[2] = generate_movk(16, (hookAddr >> 32) & 0xFFFF, 32);
-    patchInsts[3] = generate_movk(16, (hookAddr >> 48) & 0xFFFF, 48);
-    
-    // Actually we need 5 instructions (4 movz/movk + 1 br), but we only patch 4
-    // Let's use a different approach: patch with movz/movk for lower 32-bit + br
-    // This assumes hook is in lower 4GB (unlikely but let's try proper way)
-    
-    // Proper way: Store full address after instructions
-    uint8_t patchData[24]; // 16 bytes instructions + 8 bytes address
-    uint32_t* patchInstsPtr = (uint32_t*)patchData;
-    patchInstsPtr[0] = 0x58000050; // ldr x16, #8 (load from PC+8)
-    patchInstsPtr[1] = 0xd61f0200; // br x16
-    patchInstsPtr[2] = 0xd503201f; // nop
-    patchInstsPtr[3] = 0xd503201f; // nop
-    // Store hook address at offset 16
-    *(uint64_t*)(patchData + 16) = hookAddr;
-    
-    // Make SSL_write writable
-    kr = vm_protect(task, sslWriteAddr, 24, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) {
-        printf("[hookSSLWrite] ERROR: Failed to make SSL_write writable: %s\n", mach_error_string(kr));
-        vm_deallocate(task, hookShellcode, shellcodeSize);
-        vm_deallocate(task, remoteFormatStr, formatStrSize);
-        return kr;
-    }
-    
-    // Write patch
-    kr = vm_write(task, sslWriteAddr, (vm_address_t)patchData, 24);
-    if (kr != KERN_SUCCESS) {
-        printf("[hookSSLWrite] ERROR: Failed to patch SSL_write: %s\n", mach_error_string(kr));
-        vm_deallocate(task, hookShellcode, shellcodeSize);
-        vm_deallocate(task, remoteFormatStr, formatStrSize);
-        return kr;
-    }
-    
-    // Restore execute permission
-    kr = vm_protect(task, sslWriteAddr, 24, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    
-    // 8. Invalidate instruction cache
-    vm_address_t libSystemKernelAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_kernel.dylib");
-    uint64_t sys_icache_invalidate = remoteDlSym(task, libSystemKernelAddr, "_sys_icache_invalidate");
-    
-    if (sys_icache_invalidate) {
-        arbCall(task, pthread, NULL, true, sys_icache_invalidate, 2, sslWriteAddr, 24);
-        arbCall(task, pthread, NULL, true, sys_icache_invalidate, 2, hookShellcode, shellcodeSize);
-    }
-    
-    printf("[hookSSLWrite] ✓ SSL_write hooked successfully!\n");
-    printf("[hookSSLWrite]   Hook shellcode at: 0x%llX\n", (unsigned long long)hookShellcode);
-    printf("[hookSSLWrite]   Trampoline at: 0x%llX\n", (unsigned long long)trampolineAddr);
-    printf("[hookSSLWrite]   Patch uses: ldr x16, #8; br x16 + address at offset 16\n");
-    
-    return KERN_SUCCESS;
-}
-
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 {
 	prepareForMagic(task, allImageInfoAddr);
@@ -647,16 +692,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 
-	// Hook SSL_write to log buffer contents
-    kr = hookSSLWrite(task, pthread, sslWriteAddr, allImageInfoAddr);
-    if (kr != KERN_SUCCESS) {
-        printf("[injectDylibViaRop] Failed to hook SSL_write\n");
-    }
-
-    // Don't terminate pthread yet - we need it for the hook to work
-    // thread_terminate(pthread);
-    printf("[injectDylibViaRop] Hook installed, keeping pthread alive for logging...\n");
-	
+	monitorSSLWriteInTarget(task, pid, allImageInfoAddr);
 	// // FIND OFFSETS
 	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
 	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_from");
