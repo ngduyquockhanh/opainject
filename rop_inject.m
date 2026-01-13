@@ -430,7 +430,6 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
-// Thêm function này vào trước injectDylibViaRop
 kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteAddr, vm_address_t allImageInfoAddr)
 {
     kern_return_t kr = KERN_SUCCESS;
@@ -474,16 +473,7 @@ kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteA
     
     // 5. Build hook shellcode
     uint64_t hookAddr = hookShellcode;
-    uint64_t trampolineAddr = hookShellcode + 0x1000; // Trampoline ở offset 0x1000
-    
-    // Calculate branch offset from SSL_write to hook
-    int64_t branchOffset = ((int64_t)hookAddr - (int64_t)sslWriteAddr) / 4;
-    if (branchOffset > 0x1FFFFFF || branchOffset < -0x2000000) {
-        printf("[hookSSLWrite] ERROR: Branch offset too large: %lld\n", branchOffset);
-        vm_deallocate(task, hookShellcode, shellcodeSize);
-        vm_deallocate(task, remoteFormatStr, formatStrSize);
-        return KERN_FAILURE;
-    }
+    uint64_t trampolineAddr = hookShellcode + 0x1000; // Trampoline at offset 0x1000
     
     // Hook shellcode ARM64 instructions
     uint32_t hookCode[64];
@@ -503,23 +493,18 @@ kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteA
     hookCode[idx++] = 0xaa0203f5; // mov x21, x2 (num)
     
     // Load format string address into x0
-    // movz x0, #lower16(remoteFormatStr)
     hookCode[idx++] = 0xd2800000 | ((remoteFormatStr & 0xFFFF) << 5); // movz x0, #imm
-    // movk x0, #bits[16:31], lsl #16
     hookCode[idx++] = generate_movk(0, (remoteFormatStr >> 16) & 0xFFFF, 16);
-    // movk x0, #bits[32:47], lsl #32
     hookCode[idx++] = generate_movk(0, (remoteFormatStr >> 32) & 0xFFFF, 32);
-    // movk x0, #bits[48:63], lsl #48
     hookCode[idx++] = generate_movk(0, (remoteFormatStr >> 48) & 0xFFFF, 48);
     
-    // Setup printf arguments: x0=format, x1=ssl, x2=buf, x3=num, x4=buf (for %s)
+    // Setup printf arguments
     hookCode[idx++] = 0xaa1303e1; // mov x1, x19 (ssl)
     hookCode[idx++] = 0xaa1403e2; // mov x2, x20 (buf)
     hookCode[idx++] = 0xaa1503e3; // mov x3, x21 (num)
     hookCode[idx++] = 0xaa1403e4; // mov x4, x20 (buf for string)
     
     // Load printf address and call it
-    // movz x9, #lower16(printfAddr)
     hookCode[idx++] = 0xd2800009 | ((printfAddr & 0xFFFF) << 5);
     hookCode[idx++] = generate_movk(9, (printfAddr >> 16) & 0xFFFF, 16);
     hookCode[idx++] = generate_movk(9, (printfAddr >> 32) & 0xFFFF, 32);
@@ -539,7 +524,7 @@ kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteA
     hookCode[idx++] = 0xa8c173fb; // ldp x27, x28, [sp], #0x10
     hookCode[idx++] = 0xa8c17bfd; // ldp x29, x30, [sp], #0x10
     
-    // Jump to trampoline (which has original instructions + jump back)
+    // Jump to trampoline
     int64_t toTrampoline = ((int64_t)trampolineAddr - (int64_t)(hookAddr + idx * 4)) / 4;
     hookCode[idx++] = 0x14000000 | (toTrampoline & 0x3FFFFFF); // b trampoline
     
@@ -553,7 +538,7 @@ kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteA
     }
     
     // 6. Build trampoline (original instructions + jump back to SSL_write+16)
-    uint32_t trampolineCode[8];
+    uint32_t trampolineCode[16];
     int tIdx = 0;
     
     // Copy original 4 instructions
@@ -564,7 +549,6 @@ kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteA
     
     // Load address of SSL_write+16 and jump there
     uint64_t returnAddr = sslWriteAddr + 16;
-    // movz x16, #lower16
     trampolineCode[tIdx++] = 0xd2800010 | ((returnAddr & 0xFFFF) << 5);
     trampolineCode[tIdx++] = generate_movk(16, (returnAddr >> 16) & 0xFFFF, 16);
     trampolineCode[tIdx++] = generate_movk(16, (returnAddr >> 32) & 0xFFFF, 32);
@@ -579,15 +563,37 @@ kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteA
         return kr;
     }
     
-    // 7. Patch SSL_write to jump to our hook
+    // 7. Patch SSL_write to jump to hook (using absolute address)
+    // We'll use x16 as scratch register (IP0 - safe to clobber)
     uint32_t patchInsts[4];
-    patchInsts[0] = 0x14000000 | (branchOffset & 0x3FFFFFF); // b hook
-    patchInsts[1] = 0xd503201f; // nop
-    patchInsts[2] = 0xd503201f; // nop
-    patchInsts[3] = 0xd503201f; // nop
+    // ldr x16, #8 (load from PC+8, which is after these 4 instructions)
+    patchInsts[0] = 0x58000050; // ldr x16, #8
+    patchInsts[1] = 0xd61f0200; // br x16
+    // Following 8 bytes will be the hook address (stored as data)
+    // But we can only patch 4 instructions, so use movz/movk instead:
+    
+    // Alternative: Use movz/movk to load hook address into x16
+    patchInsts[0] = 0xd2800010 | ((hookAddr & 0xFFFF) << 5); // movz x16, #imm
+    patchInsts[1] = generate_movk(16, (hookAddr >> 16) & 0xFFFF, 16);
+    patchInsts[2] = generate_movk(16, (hookAddr >> 32) & 0xFFFF, 32);
+    patchInsts[3] = generate_movk(16, (hookAddr >> 48) & 0xFFFF, 48);
+    
+    // Actually we need 5 instructions (4 movz/movk + 1 br), but we only patch 4
+    // Let's use a different approach: patch with movz/movk for lower 32-bit + br
+    // This assumes hook is in lower 4GB (unlikely but let's try proper way)
+    
+    // Proper way: Store full address after instructions
+    uint8_t patchData[24]; // 16 bytes instructions + 8 bytes address
+    uint32_t* patchInstsPtr = (uint32_t*)patchData;
+    patchInstsPtr[0] = 0x58000050; // ldr x16, #8 (load from PC+8)
+    patchInstsPtr[1] = 0xd61f0200; // br x16
+    patchInstsPtr[2] = 0xd503201f; // nop
+    patchInstsPtr[3] = 0xd503201f; // nop
+    // Store hook address at offset 16
+    *(uint64_t*)(patchData + 16) = hookAddr;
     
     // Make SSL_write writable
-    kr = vm_protect(task, sslWriteAddr, 16, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    kr = vm_protect(task, sslWriteAddr, 24, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
         printf("[hookSSLWrite] ERROR: Failed to make SSL_write writable: %s\n", mach_error_string(kr));
         vm_deallocate(task, hookShellcode, shellcodeSize);
@@ -596,7 +602,7 @@ kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteA
     }
     
     // Write patch
-    kr = vm_write(task, sslWriteAddr, (vm_address_t)patchInsts, sizeof(patchInsts));
+    kr = vm_write(task, sslWriteAddr, (vm_address_t)patchData, 24);
     if (kr != KERN_SUCCESS) {
         printf("[hookSSLWrite] ERROR: Failed to patch SSL_write: %s\n", mach_error_string(kr));
         vm_deallocate(task, hookShellcode, shellcodeSize);
@@ -605,20 +611,21 @@ kern_return_t hookSSLWrite(task_t task, thread_act_t pthread, uint64_t sslWriteA
     }
     
     // Restore execute permission
-    kr = vm_protect(task, sslWriteAddr, 16, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    kr = vm_protect(task, sslWriteAddr, 24, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     
     // 8. Invalidate instruction cache
     vm_address_t libSystemKernelAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_kernel.dylib");
     uint64_t sys_icache_invalidate = remoteDlSym(task, libSystemKernelAddr, "_sys_icache_invalidate");
     
     if (sys_icache_invalidate) {
-        arbCall(task, pthread, NULL, true, sys_icache_invalidate, 2, sslWriteAddr, 16);
+        arbCall(task, pthread, NULL, true, sys_icache_invalidate, 2, sslWriteAddr, 24);
         arbCall(task, pthread, NULL, true, sys_icache_invalidate, 2, hookShellcode, shellcodeSize);
     }
     
     printf("[hookSSLWrite] ✓ SSL_write hooked successfully!\n");
     printf("[hookSSLWrite]   Hook shellcode at: 0x%llX\n", (unsigned long long)hookShellcode);
     printf("[hookSSLWrite]   Trampoline at: 0x%llX\n", (unsigned long long)trampolineAddr);
+    printf("[hookSSLWrite]   Patch uses: ldr x16, #8; br x16 + address at offset 16\n");
     
     return KERN_SUCCESS;
 }
