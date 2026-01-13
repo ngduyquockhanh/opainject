@@ -1,9 +1,3 @@
-// Hook Objective-C method in remote process using ROP, similar to hookM
-// Returns 1 if success, 0 if fail
-
-// === SSLKillSwitch ROP Hooks (Full) ===
-#include <mach/mach.h>
-#include <string.h>
 #import <stdio.h>
 #import <unistd.h>
 #import <stdlib.h>
@@ -28,10 +22,6 @@
 #import <sys/stat.h>
 #import <sys/wait.h>
 #import <CoreFoundation/CoreFoundation.h>
-#import <Foundation/Foundation.h>
-#import <Security/Security.h>
-#import <objc/runtime.h>
-#include <libkern/OSCacheControl.h>
 
 #import "pac.h"
 #import "dyld.h"
@@ -40,269 +30,6 @@
 #import "task_utils.h"
 #import "thread_utils.h"
 #import "arm64.h"
-#include <mach/vm_map.h>
-
-// Hook Objective-C method in remote process using ROP, similar to hookM
-// Monitor ssl_write using breakpoint + monitor thread
-// Returns 1 if success, 0 if fail
-
-#include <mach/mach.h>
-#include <string.h>
-#import <stdio.h>
-#import <unistd.h>
-#import <stdlib.h>
-#import <dlfcn.h>
-#import <errno.h>
-#import <string.h>
-#import <limits.h>
-#import <pthread.h>
-#import <pthread_spis.h>
-#import <mach/mach.h>
-#import <mach/error.h>
-#import <mach-o/getsect.h>
-#import <mach-o/dyld.h>
-#import <mach-o/loader.h>
-#import <mach-o/nlist.h>
-#import <mach-o/reloc.h>
-#import <mach-o/dyld_images.h>
-#import <sys/utsname.h>
-#import <sys/types.h>
-#import <sys/sysctl.h>
-#import <sys/mman.h>
-#import <sys/stat.h>
-#import <sys/wait.h>
-#import <CoreFoundation/CoreFoundation.h>
-#import <Foundation/Foundation.h>
-#import <Security/Security.h>
-#import <objc/runtime.h>
-#include <libkern/OSCacheControl.h>
-
-#import "pac.h"
-#import "dyld.h"
-#import "sandbox.h"
-#import "CoreSymbolication.h"
-#import "task_utils.h"
-#import "thread_utils.h"
-#import "arm64.h"
-#include <mach/vm_map.h>
-
-// ============ SSL Write Monitor ============
-
-typedef struct {
-    task_t task;
-    uint64_t ssl_write_addr;
-    bool running;
-    pthread_mutex_t lock;
-    uint64_t call_count;
-} ssl_monitor_state_t;
-
-ssl_monitor_state_t *g_ssl_monitor = NULL;
-
-// Monitor thread - chờ breakpoint hit
-void* ssl_monitor_thread(void *arg) {
-    ssl_monitor_state_t *state = (ssl_monitor_state_t *)arg;
-    
-    printf("[ssl_monitor_thread] Started monitoring\n");
-    
-    while (state->running) {
-        thread_t *threads;
-        mach_msg_type_number_t thread_count;
-        
-        // Get all threads
-        kern_return_t kr = task_threads(state->task, &threads, &thread_count);
-        if (kr != KERN_SUCCESS) {
-            usleep(50000);
-            continue;
-        }
-        
-        for (mach_msg_type_number_t i = 0; i < thread_count; i++) {
-            // Suspend thread to safely read state
-            thread_suspend(threads[i]);
-            
-            arm_thread_state64_t thread_state;
-            mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
-            
-            kr = thread_get_state(threads[i], ARM_THREAD_STATE64,
-                                 (thread_state_t)&thread_state, &state_count);
-            
-            if (kr == KERN_SUCCESS) {
-                // Check if PC at breakpoint (ssl_write)
-                uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(thread_state);
-                
-                if (pc == state->ssl_write_addr) {
-                    pthread_mutex_lock(&state->lock);
-                    state->call_count++;
-                    uint64_t call_num = state->call_count;
-                    pthread_mutex_unlock(&state->lock);
-                    
-                    printf("\n");
-                    printf("╔════════════════════════════════════════╗\n");
-                    printf("║  ssl_write INTERCEPTED (#%lld)         ║\n", call_num);
-                    printf("╚════════════════════════════════════════╝\n");
-                    
-                    // Read arguments from registers
-                    uint64_t ssl_ptr = thread_state.__x[0];      // x0 = SSL*
-                    uint64_t buf_ptr = thread_state.__x[1];      // x1 = buf
-                    uint32_t buf_len = thread_state.__x[2];      // x2 = len
-                    
-                    printf("[+] Thread ID: %d\n", threads[i]);
-                    printf("[+] x0 (SSL*):  0x%llx\n", ssl_ptr);
-                    printf("[+] x1 (buf):   0x%llx\n", buf_ptr);
-                    printf("[+] x2 (len):   %d (0x%x)\n", buf_len, buf_len);
-                    
-                    // Read buffer content from remote process
-                    if (buf_len > 0 && buf_len < 0x1000000) {
-                        uint8_t *buf_data = malloc(buf_len);
-                        vm_size_t actual_size = buf_len;
-                        
-                        kr = vm_read_overwrite(state->task, buf_ptr, buf_len,
-                                              (vm_address_t)buf_data, &actual_size);
-                        
-                        if (kr == KERN_SUCCESS && actual_size > 0) {
-                            // Print hex dump
-                            printf("\n[HEX] Buffer content (first %zu bytes):\n", 
-                                   actual_size > 200 ? 200 : actual_size);
-                            for (vm_size_t j = 0; j < actual_size && j < 200; j++) {
-                                printf("%02x ", buf_data[j]);
-                                if ((j + 1) % 16 == 0) printf("\n");
-                            }
-                            printf("\n");
-                            
-                            // Print ASCII dump
-                            printf("\n[ASCII] Readable content:\n");
-                            for (vm_size_t j = 0; j < actual_size && j < 200; j++) {
-                                uint8_t c = buf_data[j];
-                                if (c >= 32 && c < 127) {
-                                    printf("%c", c);
-                                } else {
-                                    printf(".");
-                                }
-                            }
-                            printf("\n");
-                        } else if (kr != KERN_SUCCESS) {
-                            printf("[ERROR] Failed to read buffer: %s\n", mach_error_string(kr));
-                        }
-                        
-                        free(buf_data);
-                    } else {
-                        printf("[!] Buffer length invalid or too large: %d\n", buf_len);
-                    }
-                    
-                    printf("\n");
-                }
-            }
-            
-            // Resume thread
-            thread_resume(threads[i]);
-        }
-        
-        vm_deallocate(mach_task_self(), (vm_address_t)threads,
-                     thread_count * sizeof(thread_t));
-        
-        usleep(50000);  // Poll every 50ms
-    }
-    
-    printf("[ssl_monitor_thread] Monitor stopped\n");
-    return NULL;
-}
-
-// Setup ssl_write monitoring
-void start_ssl_write_monitor(task_t task, uint64_t ssl_write_addr) {
-    printf("[*] Starting ssl_write monitor at 0x%llx\n", ssl_write_addr);
-    
-    // Allocate monitor state
-    g_ssl_monitor = malloc(sizeof(ssl_monitor_state_t));
-    g_ssl_monitor->task = task;
-    g_ssl_monitor->ssl_write_addr = ssl_write_addr;
-    g_ssl_monitor->running = true;
-    g_ssl_monitor->call_count = 0;
-    pthread_mutex_init(&g_ssl_monitor->lock, NULL);
-    
-    // Set breakpoint at ssl_write (replace first instruction with BRK #0)
-    uint8_t brk_instr[] = {0x00, 0x00, 0x20, 0xd4};  // BRK #0 instruction
-    
-    // First, make the memory writable
-    kern_return_t kr = vm_protect(task, ssl_write_addr, sizeof(brk_instr), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) {
-        printf("[ERROR] Failed to change memory protection: %s\n", mach_error_string(kr));
-        free(g_ssl_monitor);
-        g_ssl_monitor = NULL;
-        return;
-    }
-    
-    kr = vm_write(task, ssl_write_addr, (vm_offset_t)brk_instr, sizeof(brk_instr));
-    if (kr != KERN_SUCCESS) {
-        printf("[ERROR] Failed to set breakpoint: %s\n", mach_error_string(kr));
-        free(g_ssl_monitor);
-        g_ssl_monitor = NULL;
-        return;
-    }
-    
-    // Restore executable permissions
-    kr = vm_protect(task, ssl_write_addr, sizeof(brk_instr), FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) {
-        printf("[WARNING] Failed to restore memory protection: %s\n", mach_error_string(kr));
-    }
-    
-    printf("[+] Breakpoint set at 0x%llx\n", ssl_write_addr);
-    
-    // Start monitor thread
-    pthread_t monitor_tid;
-    int pthread_kr = pthread_create(&monitor_tid, NULL, ssl_monitor_thread, g_ssl_monitor);
-    if (pthread_kr != 0) {
-        printf("[ERROR] Failed to create monitor thread: %d\n", pthread_kr);
-        free(g_ssl_monitor);
-        g_ssl_monitor = NULL;
-        return;
-    }
-    
-    printf("[+] Monitor thread created (tid: %p)\n", (void*)monitor_tid);
-
-    printf("[+] ssl_write monitoring active!\n");
-}
-
-// Stop monitoring
-void stop_ssl_write_monitor() {
-    if (g_ssl_monitor) {
-        printf("[*] Stopping ssl_write monitor...\n");
-        g_ssl_monitor->running = false;
-        usleep(200000);
-        
-        pthread_mutex_destroy(&g_ssl_monitor->lock);
-        printf("[+] Monitor stopped. Total calls: %lld\n", g_ssl_monitor->call_count);
-        
-        free(g_ssl_monitor);
-        g_ssl_monitor = NULL;
-    }
-}
-
-void monitorSSLWriteInTarget(task_t task, pid_t pid, vm_address_t allImageInfoAddr)
-{
-	printf("[monitorSSLWriteInTarget] Starting SSL write monitoring\n");
-
-	// Find libboringssl
-	vm_address_t libBorringSSL = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
-	if (!libBorringSSL) {
-		printf("[ERROR] Failed to find libboringssl.dylib\n");
-		return;
-	}
-
-	// Find ssl_write function
-	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "_SSL_write");
-	if (!sslWriteAddr) {
-		printf("[ERROR] Failed to find SSL_write\n");
-		return;
-	}
-
-	printf("[+] libboringssl found at 0x%lx\n", libBorringSSL);
-	printf("[+] SSL_write found at 0x%llx\n", sslWriteAddr);
-
-	// Start monitoring
-	start_ssl_write_monitor(task, sslWriteAddr);
-
-	printf("[+] Monitor is running! Press Ctrl+C to stop...\n");
-	printf("[+] Any calls to ssl_write will be intercepted and logged\n");
-}
 
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
@@ -691,6 +418,67 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	return retval == 0;
 }
 
+// void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
+// {
+// 	prepareForMagic(task, allImageInfoAddr);
+
+// 	thread_act_t pthread = 0;
+// 	kern_return_t kr = createRemotePthread(task, allImageInfoAddr, &pthread);
+// 	if(kr != KERN_SUCCESS) return;
+
+// 	sandboxFixup(task, pthread, pid, dylibPath, allImageInfoAddr);
+
+// 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
+
+// 	// FIND OFFSETS
+// 	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
+// 	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
+// 	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
+
+// 	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
+
+// 	// CALL DLOPEN
+// 	size_t remoteDylibPathSize = 0;
+// 	vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
+// 	if(remoteDylibPath)
+// 	{
+// 		void* dlopenRet;
+// 		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
+// 		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
+
+// 		if (dlopenRet) {
+// 			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+
+// 			sleep(1); 
+// 			printf("[injectDylibViaRop] Checking if dylib loaded...\n");
+// 			vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
+// 			printf("[injectDylibViaRop] myDylibBase: 0x%llx\n", myDylibBase);
+			
+// 			if (myDylibBase) {
+// 				uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "_my_entrypoint");
+// 				if (myFuncAddr) {
+// 					uint64_t result = 0;
+// 					arbCall(task, pthread, &result, true, myFuncAddr, 0);
+// 					printf("[injectDylibViaRop] Called my_entrypoint! Result: %llu\n", result);
+// 				} else {
+// 					printf("[injectDylibViaRop] Could not find my_entrypoint symbol.\n");
+// 				}
+// 			} else {
+// 				printf("[injectDylibViaRop] Could not find base address of injected dylib.\n");
+// 			}
+// 		}
+// 		else {
+// 			uint64_t remoteErrorString = 0;
+// 			arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
+// 			char *errorString = task_copy_string(task, remoteErrorString);
+// 			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
+// 			free(errorString);
+// 		}
+// 	}
+
+// 	thread_terminate(pthread);
+// }
+
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 {
 	prepareForMagic(task, allImageInfoAddr);
@@ -703,44 +491,134 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
-	vm_address_t libBorringSSL = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
-	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "_SSL_write");
+	// Lấy base address của libobjc.A.dylib
+	vm_address_t libObjcAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libobjc.A.dylib");
+	printf("libobjc.A.dylib base: 0x%llx\n", (unsigned long long)libObjcAddr);
 
-	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
+	// Resolve địa chỉ hàm objc_copyClassList
+	uint64_t objcCopyClassListAddr = remoteDlSym(task, libObjcAddr, "_objc_copyClassList");
+	printf("objc_copyClassList address: 0x%llx\n", (unsigned long long)objcCopyClassListAddr);
 
-	monitorSSLWriteInTarget(task, pid, allImageInfoAddr);
-	// // FIND OFFSETS
+
+	size_t remoteCountLen = sizeof(uint32_t);
+	vm_address_t remoteCountPtr = 0;
+	kern_return_t kr = vm_allocate(task, &remoteCountPtr, remoteCountLen, VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) {
+		printf("ERROR: Unable to allocate memory for count\n");
+		return;
+	}
+
+	uint64_t classArrayPtr = 0;
+	arbCall(task, pthread, &classArrayPtr, true, objcCopyClassListAddr, 1, remoteCountPtr);
+	printf("[injectDylibViaRop] objc_copyClassList returned pointer: 0x%llx\n", classArrayPtr);
+
+	uint32_t classCount = 0;
+	vm_size_t outSize = 0;
+	kr = vm_read_overwrite(task, remoteCountPtr, sizeof(classCount), (vm_address_t)&classCount, &outSize);
+	printf("Number of classes: %u\n", classCount);
+
+	for (uint32_t i = 0; i < classCount; i++) {
+		uint64_t classPtr = 0;
+		kr = vm_read_overwrite(task, classArrayPtr + i * sizeof(uint64_t), sizeof(uint64_t), (vm_address_t)&classPtr, &outSize);
+		if (kr != KERN_SUCCESS) continue;
+
+		// Gọi ROP để lấy tên class: class_getName
+		uint64_t classGetNameAddr = remoteDlSym(task, libObjcAddr, "_class_getName");
+		uint64_t namePtr = 0;
+		arbCall(task, pthread, &namePtr, true, classGetNameAddr, 1, classPtr);
+
+		if (namePtr) {
+			char *className = task_copy_string(task, namePtr);
+			printf("Class[%u]: %s\n", i, className ? className : "(null)");
+			if (className) free(className);
+		}
+	}
+	vm_deallocate(task, remoteCountPtr, remoteCountLen);
+
+	// FIND OFFSETS
 	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_from");
+	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
 	// uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 
-	// vm_address_t libDyldTextStart = 0, libDyldTextEnd = 0;
-
-	// printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
+	// printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", dlopenAddr, dlerrorAddr);
 
 	// // CALL DLOPEN
 	// size_t remoteDylibPathSize = 0;
-	// vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
+	// vm_address_t remoteDylibPath = writeStringToTask(task, dylibPath, &remoteDylibPathSize);
 	// if(remoteDylibPath)
 	// {
 	// 	void* dlopenRet;
-	// 	// Prepare addressInCaller for dlopen_from (third argument)
-	// 	void* addressInCaller = NULL; // Set as needed, e.g., NULL or a valid address
-	// 	arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 3, remoteDylibPath, RTLD_NOW, addressInCaller);
+	// 	printf("[injectDylibViaRop] >>> Calling dlopen with RTLD_NOW\n");
+	// 	arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
 	// 	vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
 
 	// 	if (dlopenRet) {
-	// 		printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+	// 		printf("[injectDylibViaRop] dlopen succeeded, handle: %p\n", dlopenRet);
+			
+	// 		sleep(1); // Chờ constructor
 
-	// 	}
-	// 	else {
+	// 		// ===== KIỂM TRA DYLIB LOAD =====
+	// 		printf("[injectDylibViaRop] Checking if dylib loaded...\n");
+	// 		vm_address_t myDylibBase = getRemoteImageAddress(task, allImageInfoAddr, dylibPath);
+	// 		printf("[injectDylibViaRop] myDylibBase: 0x%lx\n", (unsigned long)myDylibBase);
+			
+	// 		if (!myDylibBase) {
+	// 			printf("[injectDylibViaRop] ERROR: dylib not in image list!\n");
+	// 			printf("[injectDylibViaRop] Listing all loaded images:\n");
+	// 			// Dump tất cả images
+	// 			// TODO: add code để list images
+	// 			goto cleanup;
+	// 		}
+
+	// 		// ===== TRY GỌILỖI SIMPLE FUNCTION TRƯỚC =====
+	// 		// Thay vì gọi my_entrypoint, hãy test gọi strlen trước
+	// 		printf("[injectDylibViaRop] TEST: Calling strlen (system function)...\n");
+	// 		uint64_t strlenAddr = remoteDlSym(task, getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libSystem.B.dylib"), "_strlen");
+			
+	// 		if (strlenAddr) {
+	// 			uint64_t testResult = 0;
+	// 			const char* testStr = "hello";
+	// 			vm_address_t remoteStr = writeStringToTask(task, testStr, NULL);
+				
+	// 			printf("[injectDylibViaRop] Calling strlen(\"%s\") at 0x%llx with arg at 0x%lx...\n", testStr, strlenAddr, (unsigned long)remoteStr);
+	// 			arbCall(task, pthread, &testResult, true, strlenAddr, 1, remoteStr);
+	// 			printf("[injectDylibViaRop] strlen returned: %llu (expected 5)\n", testResult);
+				
+	// 			vm_deallocate(task, remoteStr, strlen(testStr) + 1);
+				
+	// 			if (testResult == 5) {
+	// 				printf("[injectDylibViaRop] ✓ strlen works! System functions OK\n");
+	// 			}
+	// 		}
+
+	// 		// ===== GỌI MY_ENTRYPOINT =====
+	// 		uint64_t myFuncAddr = remoteDlSym(task, myDylibBase, "_my_entrypoint");
+	// 		printf("[injectDylibViaRop] _my_entrypoint: 0x%llx\n", myFuncAddr);
+			
+	// 		if (myFuncAddr) {
+	// 			printf("[injectDylibViaRop] >>> Calling my_entrypoint at 0x%llx...\n", myFuncAddr);
+				
+	// 			uint64_t result = 0;
+	// 			time_t startCall = time(NULL);
+				
+	// 			arbCall(task, pthread, &result, true, myFuncAddr, 0);
+				
+	// 			time_t elapsed = time(NULL) - startCall;
+	// 			printf("[injectDylibViaRop] my_entrypoint returned after %ld seconds, result: %llu\n", elapsed, result);
+	// 		} else {
+	// 			printf("[injectDylibViaRop] ERROR: Could not find _my_entrypoint\n");
+	// 		}
+
+	// 	} else {
+	// 		printf("[injectDylibViaRop] dlopen FAILED!\n");
 	// 		uint64_t remoteErrorString = 0;
 	// 		arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
 	// 		char *errorString = task_copy_string(task, remoteErrorString);
-	// 		printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
-	// 		free(errorString);
+	// 		printf("[injectDylibViaRop] dlerror: %s\n", errorString ? errorString : "(null)");
+	// 		if (errorString) free(errorString);
 	// 	}
 	// }
 
+// cleanup:
 	thread_terminate(pthread);
 }
