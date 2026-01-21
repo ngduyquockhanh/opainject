@@ -80,7 +80,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
         // Correct the vm_region call by passing the address of src
         vm_address_t src_address = (vm_address_t)*src;
         // Replace vm_region with vm_region_64 for 64-bit compatibility
-        mach_vm_size_t size;
+        vm_size_t size;
         vm_region_basic_info_data_64_t info;
         mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
         mach_port_t object_name;
@@ -89,7 +89,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
             printf("[save_header] vm_region_64 failed for address %p: %s\n", (void *)src_address, mach_error_string(region_kr));
             return; // Exit if the address is invalid
         }
-        printf("[save_header] Address %p is valid. Region size: %llu, Protection: %d\n", (void *)src_address, size, info.protection);
+        printf("[save_header] Address %p is valid. Region size: %lu, Protection: %d\n", (void *)src_address, (unsigned long)size, info.protection);
         
         // Proceed with mach_vm_read_overwrite
         kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
