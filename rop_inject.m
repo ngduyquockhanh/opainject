@@ -637,8 +637,12 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 				}
 				
 				// Restore original instruction
+				vm_protect(task, sslWriteAddr, 4, FALSE,
+				          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 				kr = vm_write(task, sslWriteAddr, 
 				             (vm_offset_t)&original_insn, 4);
+				vm_protect(task, sslWriteAddr, 4, FALSE,
+				          VM_PROT_READ | VM_PROT_EXECUTE);
 				
 				// Rewind PC to re-execute original instruction
 				__darwin_arm_thread_state64_set_pc_fptr(thread_state, (void*)sslWriteAddr);
