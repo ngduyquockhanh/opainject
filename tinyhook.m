@@ -75,9 +75,11 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
         // Đọc lệnh từ bộ nhớ từ xa
         printf("Reading instruction at %p\n", *src);
         printf("[save_header] Attempting to read instruction at %p\n", *src);
+        printf("[save_header] Task: %d, Source Address: %p, Size: %zu\n", task, *src, sizeof(uint32_t));
         kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
         if (kr != KERN_SUCCESS) {
             printf("[save_header] mach_vm_read_overwrite failed at %p: %s\n", *src, mach_error_string(kr));
+            printf("[save_header] Possible reasons: invalid task, inaccessible memory, or insufficient permissions.\n");
             return; // Exit the function to prevent further crashes
         }
         printf("[save_header] Successfully read instruction: 0x%08x\n", insn);
