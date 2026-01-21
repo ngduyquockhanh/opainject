@@ -490,7 +490,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 
-	// // === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
+	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
 	// if (sslWriteAddr) {
 	// 	printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
 		
@@ -562,262 +562,66 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	// 	printf("[DEBUG] Test complete - app should run normally without hook\n");
 	// }
 
-	// === HOOK SSL_write với trampoline ===
-	if (sslWriteAddr) {
-		printf("[DEBUG] Hooking SSL_write to log buffer content\n");
-		
-		// 1. Suspend all threads
-		thread_act_array_t threads;
-		mach_msg_type_number_t thread_count;
-		kr = task_threads(task, &threads, &thread_count);
-		if (kr == KERN_SUCCESS) {
-			for (int i = 0; i < thread_count; i++) {
-				thread_suspend(threads[i]);
-			}
-		}
-		
-		// 2. Save original instructions (we'll overwrite first 16 bytes)
-		uint32_t original_insns[4] = {0};
-		vm_size_t read_size = 16;
-		kr = vm_read_overwrite(task, sslWriteAddr, 16,
-							(vm_address_t)original_insns, &read_size);
-		if (kr != KERN_SUCCESS) {
-			printf("[DEBUG] ERROR: Failed to read original: %s\n", mach_error_string(kr));
-			goto cleanup;
-		}
-		
-		printf("[DEBUG] Original bytes: %08X %08X %08X %08X\n",
-			original_insns[0], original_insns[1],
-			original_insns[2], original_insns[3]);
-		
-		// 3. Allocate memory for hook handler + trampoline
-		vm_address_t hookRegion = 0;
-		size_t hookRegionSize = 4096; // 1 page
-		kr = vm_allocate(task, &hookRegion, hookRegionSize, VM_FLAGS_ANYWHERE);
-		if (kr != KERN_SUCCESS) {
-			printf("[DEBUG] ERROR: Failed to allocate hook region: %s\n", mach_error_string(kr));
-			goto cleanup;
-		}
-		
-		kr = vm_protect(task, hookRegion, hookRegionSize, FALSE,
-					VM_PROT_READ | VM_PROT_WRITE);
-		if (kr != KERN_SUCCESS) {
-			printf("[DEBUG] ERROR: Failed to make hook region writable: %s\n", mach_error_string(kr));
-			vm_deallocate(task, hookRegion, hookRegionSize);
-			goto cleanup;
-		}
-		
-		// 4. Build hook shellcode
-		// Layout:
-		// [0x000] Hook handler code
-		// [0x200] Trampoline (original instructions + jump back)
-		// [0x400] Buffer storage area
-		
-		uint32_t hookCode[128] = {0}; // 512 bytes for hook
-		int idx = 0;
-		
-		// Hook handler:
-		// Save all registers
-		hookCode[idx++] = 0xA9BF7BFD; // stp x29, x30, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF73FB; // stp x27, x28, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF6BF9; // stp x25, x26, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF63F7; // stp x23, x24, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF5BF5; // stp x21, x22, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF53F3; // stp x19, x20, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF4FF1; // stp x17, x18, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF47EF; // stp x15, x16, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF3FED; // stp x13, x14, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF37EB; // stp x11, x12, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF2FE9; // stp x9, x10, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF27E7; // stp x7, x8, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF1FE5; // stp x5, x6, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF17E3; // stp x3, x4, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF0FE1; // stp x1, x2, [sp, #-16]!
-		hookCode[idx++] = 0xA9BF07E0; // stp x0, xzr, [sp, #-16]!
-		
-		// Log arguments: x0=SSL*, x1=buf*, x2=len
-		// Store them in our buffer area (hookRegion + 0x400)
-		uint64_t storageArea = hookRegion + 0x400;
-		
-		// x3 = storage address (we'll compute this with ADRP+ADD)
-		int64_t pageOffset = (storageArea >> 12) - (sslWriteAddr >> 12);
-		uint32_t adrp_x3 = 0x90000003 | ((pageOffset & 0x3) << 29) | (((pageOffset >> 2) & 0x7FFFF) << 5);
-		hookCode[idx++] = adrp_x3; // adrp x3, storage_page
-		
-		uint32_t pageRemainder = storageArea & 0xFFF;
-		hookCode[idx++] = 0x91000063 | (pageRemainder << 10); // add x3, x3, #page_remainder
-		
-		// Store x0, x1, x2 to storage
-		hookCode[idx++] = 0xF9000060; // str x0, [x3]      // SSL*
-		hookCode[idx++] = 0xF9000461; // str x1, [x3, #8]  // buf*
-		hookCode[idx++] = 0xF9000862; // str x2, [x3, #16] // len
-		
-		// Restore all registers
-		hookCode[idx++] = 0xA8C107E0; // ldp x0, xzr, [sp], #16
-		hookCode[idx++] = 0xA8C10FE1; // ldp x1, x2, [sp], #16
-		hookCode[idx++] = 0xA8C117E3; // ldp x3, x4, [sp], #16
-		hookCode[idx++] = 0xA8C11FE5; // ldp x5, x6, [sp], #16
-		hookCode[idx++] = 0xA8C127E7; // ldp x7, x8, [sp], #16
-		hookCode[idx++] = 0xA8C12FE9; // ldp x9, x10, [sp], #16
-		hookCode[idx++] = 0xA8C137EB; // ldp x11, x12, [sp], #16
-		hookCode[idx++] = 0xA8C13FED; // ldp x13, x14, [sp], #16
-		hookCode[idx++] = 0xA8C147EF; // ldp x15, x16, [sp], #16
-		hookCode[idx++] = 0xA8C14FF1; // ldp x17, x18, [sp], #16
-		hookCode[idx++] = 0xA8C153F3; // ldp x19, x20, [sp], #16
-		hookCode[idx++] = 0xA8C15BF5; // ldp x21, x22, [sp], #16
-		hookCode[idx++] = 0xA8C163F7; // ldp x23, x24, [sp], #16
-		hookCode[idx++] = 0xA8C16BF9; // ldp x25, x26, [sp], #16
-		hookCode[idx++] = 0xA8C173FB; // ldp x27, x28, [sp], #16
-		hookCode[idx++] = 0xA8C17BFD; // ldp x29, x30, [sp], #16
-		
-		// Jump to trampoline (hookRegion + 0x200)
-		uint64_t trampolineAddr = hookRegion + 0x200;
-		int64_t trampolineOffset = (trampolineAddr - (hookRegion + idx * 4)) / 4;
-		hookCode[idx++] = 0x14000000 | (trampolineOffset & 0x3FFFFFF); // b trampoline
-		
-		// 5. Build trampoline at offset 0x200
-		uint32_t trampoline[8] = {0};
-		int tidx = 0;
-		
-		// Copy original 4 instructions
-		trampoline[tidx++] = original_insns[0];
-		trampoline[tidx++] = original_insns[1];
-		trampoline[tidx++] = original_insns[2];
-		trampoline[tidx++] = original_insns[3];
-		
-		// Jump back to SSL_write + 16
-		uint64_t returnAddr = sslWriteAddr + 16;
-		// Load address to x16 then branch
-		// uint64_t offset_to_return = returnAddr - trampolineAddr;
-		
-		// Use absolute jump with movk sequence
-		trampoline[tidx++] = 0xD2800010 | (((returnAddr >> 0) & 0xFFFF) << 5);  // movz x16, #imm
-		trampoline[tidx++] = 0xF2A00010 | (((returnAddr >> 16) & 0xFFFF) << 5); // movk x16, #imm, lsl #16
-		trampoline[tidx++] = 0xF2C00010 | (((returnAddr >> 32) & 0xFFFF) << 5); // movk x16, #imm, lsl #32
-		trampoline[tidx++] = 0xD61F0200; // br x16
-		
-		// 6. Write hook code
-		kr = vm_write(task, hookRegion, (vm_offset_t)hookCode, sizeof(hookCode));
-		if (kr != KERN_SUCCESS) {
-			printf("[DEBUG] ERROR: Failed to write hook code: %s\n", mach_error_string(kr));
-			vm_deallocate(task, hookRegion, hookRegionSize);
-			goto cleanup;
-		}
-		
-		// 7. Write trampoline
-		kr = vm_write(task, trampolineAddr, (vm_offset_t)trampoline, sizeof(trampoline));
-		if (kr != KERN_SUCCESS) {
-			printf("[DEBUG] ERROR: Failed to write trampoline: %s\n", mach_error_string(kr));
-			vm_deallocate(task, hookRegion, hookRegionSize);
-			goto cleanup;
-		}
-		
-		// 8. Make hook region executable
-		kr = vm_protect(task, hookRegion, hookRegionSize, FALSE,
-					VM_PROT_READ | VM_PROT_EXECUTE);
-		if (kr != KERN_SUCCESS) {
-			printf("[DEBUG] ERROR: Failed to make hook executable: %s\n", mach_error_string(kr));
-			vm_deallocate(task, hookRegion, hookRegionSize);
-			goto cleanup;
-		}
-		
-		// 9. Patch SSL_write to jump to our hook
-		uint32_t jumpPatch[4];
-		
-		// Build jump instruction to hookRegion
-		// movz x16, #imm
-		jumpPatch[0] = 0xD2800010 | (((hookRegion >> 0) & 0xFFFF) << 5);
-		// movk x16, #imm, lsl #16
-		jumpPatch[1] = 0xF2A00010 | (((hookRegion >> 16) & 0xFFFF) << 5);
-		// movk x16, #imm, lsl #32
-		jumpPatch[2] = 0xF2C00010 | (((hookRegion >> 32) & 0xFFFF) << 5);
-		// br x16
-		jumpPatch[3] = 0xD61F0200;
-		
-		kr = vm_protect(task, sslWriteAddr, 16, FALSE,
-					VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-		if (kr == KERN_SUCCESS) {
-			kr = vm_write(task, sslWriteAddr, (vm_offset_t)jumpPatch, 16);
-			if (kr == KERN_SUCCESS) {
-				printf("[DEBUG] SSL_write hooked successfully!\n");
-				printf("[DEBUG] Hook at: 0x%lX\n", (unsigned long)hookRegion);
-				printf("[DEBUG] Storage at: 0x%lX\n", (unsigned long)storageArea);
-			}
-			vm_protect(task, sslWriteAddr, 16, FALSE,
-					VM_PROT_READ | VM_PROT_EXECUTE);
-		}
-		
-	cleanup:
-		// 10. Resume threads
-		if (thread_count > 0) {
-			for (int i = 0; i < thread_count; i++) {
-				thread_resume(threads[i]);
-			}
-			vm_deallocate(mach_task_self(), (vm_offset_t)threads,
-						sizeof(thread_act_array_t) * thread_count);
-		}
-		
-		// 11. Monitor thread - đọc storage area định kỳ
-		if (kr == KERN_SUCCESS) {
-			printf("[DEBUG] Starting monitor thread...\n");
-			
-			dispatch_queue_t monitorQueue = dispatch_queue_create("ssl.monitor", NULL);
-			dispatch_async(monitorQueue, ^{
-				while (1) {
-					sleep(1); // Check every second
-					
-					uint64_t args[3] = {0};
-					vm_size_t read_sz = sizeof(args);
-					kern_return_t kr = vm_read_overwrite(task, storageArea, sizeof(args),
-														(vm_address_t)args, &read_sz);
-					
-					if (kr == KERN_SUCCESS && args[1] != 0) { // buf* không null
-						printf("\n[SSL_WRITE CALLED]\n");
-						printf("  SSL*:   0x%016llX\n", args[0]);
-						printf("  buf*:   0x%016llX\n", args[1]);
-						printf("  length: %lld bytes\n", args[2]);
-						
-						// Read buffer content
-						if (args[2] > 0 && args[2] < 16384) {
-							char *buf = malloc(args[2] + 1);
-							if (buf) {
-								vm_size_t buf_read = args[2];
-								kr = vm_read_overwrite(task, args[1], args[2],
-													(vm_address_t)buf, &buf_read);
-								if (kr == KERN_SUCCESS) {
-									buf[args[2]] = '\0';
-									printf("\n=== BUFFER CONTENT ===\n");
-									printf("%.*s\n", (int)args[2], buf);
-									printf("======================\n\n");
-									
-									// Hex dump
-									printf("Hex: ");
-									for (int i = 0; i < args[2] && i < 64; i++) {
-										printf("%02X ", (unsigned char)buf[i]);
-									}
-									printf("\n\n");
-								}
-								free(buf);
-							}
-						}
-						
-						// Clear storage để detect call mới
-						uint64_t zeros[3] = {0};
-						vm_write(task, storageArea, (vm_offset_t)zeros, sizeof(zeros));
-					}
-				}
-			});
-		}
-	}
 	
-	/* TRAMPOLINE HOOK - DISABLED (causes crash due to stack frame corruption)
-	// The issue: copying function prologue breaks stack management
-	// SSL_write starts with:
-	//   PACIBSP           - PAC authentication  
-	//   SUB SP, SP, #0x40 - allocate stack frame
-	//   STP ...           - save registers
-	// When we copy these to trampoline and jump back, stack is corrupted
-	*/
+	
+	hookSSLWrite(task, sslWriteAddr);
 	
 	thread_terminate(pthread);
+}
+
+// Hook SSL_write to print the buffer
+void hookSSLWrite(task_t task, vm_address_t sslWriteAddr) {
+    kern_return_t kr;
+
+    // Allocate memory for the trampoline
+    vm_address_t trampolineAddr = 0;
+    kr = vm_allocate(task, &trampolineAddr, 0x1000, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        printf("[hookSSLWrite] ERROR: Unable to allocate memory for trampoline: %s\n", mach_error_string(kr));
+        return;
+    }
+
+    // Make the trampoline memory executable
+    kr = vm_protect(task, trampolineAddr, 0x1000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        printf("[hookSSLWrite] ERROR: Unable to make trampoline memory executable: %s\n", mach_error_string(kr));
+        return;
+    }
+
+    // Save the original bytes of SSL_write
+    uint32_t originalBytes[4];
+    vm_size_t readSize = sizeof(originalBytes);
+    kr = vm_read_overwrite(task, sslWriteAddr, readSize, (vm_address_t)originalBytes, &readSize);
+    if (kr != KERN_SUCCESS) {
+        printf("[hookSSLWrite] ERROR: Unable to read original bytes of SSL_write: %s\n", mach_error_string(kr));
+        return;
+    }
+
+    // Write the trampoline code
+    uint32_t trampolineCode[] = {
+        0xD503201F, // NOP
+        0xD503201F, // NOP
+        0xD503201F, // NOP
+        0xD503201F  // NOP
+    };
+    kr = vm_write(task, trampolineAddr, (vm_offset_t)trampolineCode, sizeof(trampolineCode));
+    if (kr != KERN_SUCCESS) {
+        printf("[hookSSLWrite] ERROR: Unable to write trampoline code: %s\n", mach_error_string(kr));
+        return;
+    }
+
+    // Hook SSL_write
+    uint32_t hookCode[] = {
+        0xD503201F, // NOP
+        0xD503201F, // NOP
+        0xD503201F, // NOP
+        0xD503201F  // NOP
+    };
+    kr = vm_write(task, sslWriteAddr, (vm_offset_t)hookCode, sizeof(hookCode));
+    if (kr != KERN_SUCCESS) {
+        printf("[hookSSLWrite] ERROR: Unable to write hook code: %s\n", mach_error_string(kr));
+        return;
+    }
+
+    printf("[hookSSLWrite] Hooked SSL_write successfully\n");
 }
