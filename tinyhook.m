@@ -77,6 +77,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
         mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
 
         if (((insn ^ 0x90000000) & 0x9f000000) == 0) {
+            printf("Patching adrp instruction: 0x%08x\n", insn);
             // adrp
             int32_t imm21 = sign_extend((insn >> 29 & 0x3) | (insn >> 3 & 0x1ffffc), 21);
             int64_t addr = ((int64_t)*src >> 12) + imm21;
@@ -103,6 +104,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
                 }
             }
         } else if (((insn ^ 0x14000000) & 0xfc000000) == 0 || ((insn ^ 0x94000000) & 0xfc000000) == 0) {
+            printf("Patching branch instruction: 0x%08x\n", insn);
             // b or bl
             bool link = insn >> 31;
             int32_t imm26 = sign_extend(insn, 26);
@@ -110,11 +112,13 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
             int jump_len = calc_jump((uint8_t *)*dst, *dst, addr, link);
             *dst += jump_len;
         } else {
+            printf("Copying instruction: 0x%08x\n", insn);
             mach_vm_write(task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
             *dst += 4;
         }
         *src += 4;
     }
+    printf("Restoring protections for vmbase %p\n", (void *)vmbase);
     mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     printf("Header saved, new src: %p, new dst: %p\n", *src, *dst);
     return;
