@@ -490,47 +490,69 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 
-	// === SIMPLE INLINE HOOK: Replace SSL_write with custom function ===
+	// === INLINE HOOK: Trampoline approach for 64-bit addresses ===
 	if (sslWriteAddr) {
 		printf("[DEBUG] Hooking SSL_write at 0x%llX\n", sslWriteAddr);
 		
-		// Allocate memory for hook function in remote process
-		vm_address_t hook_addr = (vm_address_t)NULL;
-		size_t hook_size = 4096; // 1 page
-		kr = vm_allocate(task, &hook_addr, hook_size, VM_FLAGS_ANYWHERE);
+		// Save original bytes from SSL_write (we need 16 bytes for trampoline)
+		uint32_t original_bytes[4] = {0};
+		vm_size_t read_size = 16;
+		kr = vm_read_overwrite(task, sslWriteAddr, 16, 
+		                      (vm_address_t)original_bytes, &read_size);
+		if (kr == KERN_SUCCESS) {
+			printf("[DEBUG] Original bytes: %08X %08X %08X %08X\n", 
+			       original_bytes[0], original_bytes[1], 
+			       original_bytes[2], original_bytes[3]);
+		}
+		
+		// Allocate memory for trampoline (stores original code + jump back)
+		vm_address_t trampoline_addr = (vm_address_t)NULL;
+		size_t trampoline_size = 4096;
+		kr = vm_allocate(task, &trampoline_addr, trampoline_size, VM_FLAGS_ANYWHERE);
 		if (kr != KERN_SUCCESS) {
-			printf("[DEBUG] ERROR: Failed to allocate hook memory: %s\n", mach_error_string(kr));
+			printf("[DEBUG] ERROR: Failed to allocate trampoline: %s\n", mach_error_string(kr));
 		} else {
-			kr = vm_protect(task, hook_addr, hook_size, FALSE,
+			kr = vm_protect(task, trampoline_addr, trampoline_size, FALSE,
 			               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
 			if (kr == KERN_SUCCESS) {
-				printf("[DEBUG] Allocated hook memory at 0x%llX\n", (unsigned long long)hook_addr);
+				printf("[DEBUG] Allocated trampoline at 0x%llX\n", (unsigned long long)trampoline_addr);
 				
-				// Build hook shellcode (ARM64)
-				// Simple version: just call original function for now
-				uint32_t shellcode[16];
+				// Build trampoline:
+				// 1. Execute original instructions
+				// 2. Load address of SSL_write+16 into register
+				// 3. Branch to it (continue original function)
+				uint32_t trampoline[16];
 				int idx = 0;
 				
-				// Save original instruction we're replacing
-				uint32_t original_insn = 0;
-				vm_size_t read_size = 4;
-				vm_read_overwrite(task, sslWriteAddr, 4, 
-				                 (vm_address_t)&original_insn, &read_size);
-				printf("[DEBUG] Original instruction: 0x%08X\n", original_insn);
+				// Copy original 4 instructions
+				trampoline[idx++] = original_bytes[0];
+				trampoline[idx++] = original_bytes[1];
+				trampoline[idx++] = original_bytes[2];
+				trampoline[idx++] = original_bytes[3];
 				
-				// Hook stub: Log and jump to original + 4
-				// For simplicity, just redirect to original function + 4
-				int64_t offset = (sslWriteAddr + 4) - hook_addr;
+				// Load return address (SSL_write+16) into x16
+				uint64_t return_addr = sslWriteAddr + 16;
+				// LDR x16, #8  - load from PC+8
+				trampoline[idx++] = 0x58000050;
+				// BR x16 - branch to x16
+				trampoline[idx++] = 0xD61F0200;
+				// Address data (little-endian 64-bit)
+				trampoline[idx++] = (uint32_t)(return_addr & 0xFFFFFFFF);
+				trampoline[idx++] = (uint32_t)(return_addr >> 32);
 				
-				// B <offset> - branch to original+4
-				shellcode[idx++] = 0x14000000 | ((offset / 4) & 0x03FFFFFF);
-				
-				// Write shellcode to remote memory
-				kr = vm_write(task, hook_addr, (vm_offset_t)shellcode, idx * 4);
+				// Write trampoline
+				kr = vm_write(task, trampoline_addr, (vm_offset_t)trampoline, idx * 4);
 				if (kr != KERN_SUCCESS) {
-					printf("[DEBUG] ERROR: Failed to write shellcode: %s\n", mach_error_string(kr));
+					printf("[DEBUG] ERROR: Failed to write trampoline: %s\n", mach_error_string(kr));
 				} else {
-					// Now patch SSL_write to jump to our hook
+					printf("[DEBUG] Trampoline written successfully\n");
+					
+					// Now patch SSL_write with jump to trampoline
+					// We'll use 16 bytes (4 instructions) at SSL_write:
+					// LDR x16, #8
+					// BR x16
+					// .quad trampoline_addr
+					
 					thread_act_array_t threads;
 					mach_msg_type_number_t thread_count;
 					kr = task_threads(task, &threads, &thread_count);
@@ -541,30 +563,29 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 					}
 					
 					// Make SSL_write writable
-					kr = vm_protect(task, sslWriteAddr, 4, FALSE,
+					kr = vm_protect(task, sslWriteAddr, 16, FALSE,
 					               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 					if (kr == KERN_SUCCESS) {
-						// Calculate offset from SSL_write to hook
-						offset = hook_addr - sslWriteAddr;
-						uint32_t branch_insn = 0x14000000 | ((offset / 4) & 0x03FFFFFF);
+						uint32_t hook_stub[4];
+						// LDR x16, #8
+						hook_stub[0] = 0x58000050;
+						// BR x16
+						hook_stub[1] = 0xD61F0200;
+						// Address (little-endian)
+						hook_stub[2] = (uint32_t)(trampoline_addr & 0xFFFFFFFF);
+						hook_stub[3] = (uint32_t)(trampoline_addr >> 32);
 						
-						// Write branch instruction
-						kr = vm_write(task, sslWriteAddr, (vm_offset_t)&branch_insn, 4);
+						kr = vm_write(task, sslWriteAddr, (vm_offset_t)hook_stub, 16);
 						if (kr == KERN_SUCCESS) {
-							printf("[DEBUG] Hook installed successfully\n");
-							printf("[DEBUG] Branch instruction: 0x%08X (offset: %lld)\n", 
-							       branch_insn, offset);
+							printf("[DEBUG] Hook stub installed at SSL_write\n");
+							printf("[DEBUG] Jump to trampoline: 0x%llX\n", (unsigned long long)trampoline_addr);
 						} else {
-							printf("[DEBUG] ERROR: Failed to write branch: %s\n", 
-							       mach_error_string(kr));
+							printf("[DEBUG] ERROR: Failed to write hook stub: %s\n", mach_error_string(kr));
 						}
 						
 						// Restore executable permission
-						vm_protect(task, sslWriteAddr, 4, FALSE,
+						vm_protect(task, sslWriteAddr, 16, FALSE,
 						          VM_PROT_READ | VM_PROT_EXECUTE);
-					} else {
-						printf("[DEBUG] ERROR: Failed to make writable: %s\n",
-						       mach_error_string(kr));
 					}
 					
 					// Resume threads
@@ -582,64 +603,5 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		printf("[DEBUG] Hook setup complete - app should continue normally\n");
 	}
 	
-	/* BREAKPOINT APPROACH - DISABLED (causes crashes)
-	if (sslWriteAddr) {
-		printf("[DEBUG] Setting breakpoint at SSL_write: 0x%llX\n", sslWriteAddr);
-		
-		// 1. Save old exception ports before override
-		exception_mask_t old_masks[EXC_TYPES_COUNT];
-		mach_port_t old_ports[EXC_TYPES_COUNT];
-		exception_behavior_t old_behaviors[EXC_TYPES_COUNT];
-		thread_state_flavor_t old_flavors[EXC_TYPES_COUNT];
-		mach_msg_type_number_t old_count = 0;
-		
-		kr = task_get_exception_ports(task, 
-		                              EXC_MASK_BREAKPOINT | EXC_MASK_BAD_INSTRUCTION,
-		                              old_masks, &old_count,
-		                              old_ports, old_behaviors, old_flavors);
-		if (kr == KERN_SUCCESS) {
-			printf("[DEBUG] Saved %d old exception port(s)\n", old_count);
-		}
-		printf("[DEBUG] Hook setup complete - app should continue normally\n");
-	}*/
-	
-	/* BREAKPOINT APPROACH - DISABLED (causes crashes)
-	// Comment out the entire breakpoint code since it causes app crash
-	// due to exception port conflicts and complex message handling
-	*/
-	
-	// // FIND OFFSETS
-	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
-	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_from");
-	// uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
-
-	// vm_address_t libDyldTextStart = 0, libDyldTextEnd = 0;
-
-	// printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
-
-	// // CALL DLOPEN
-	// size_t remoteDylibPathSize = 0;
-	// vm_address_t remoteDylibPath = writeStringToTask(task, (const char*)dylibPath, &remoteDylibPathSize);
-	// if(remoteDylibPath)
-	// {
-	// 	void* dlopenRet;
-	// 	// Prepare addressInCaller for dlopen_from (third argument)
-	// 	void* addressInCaller = NULL; // Set as needed, e.g., NULL or a valid address
-	// 	arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 3, remoteDylibPath, RTLD_NOW, addressInCaller);
-	// 	vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
-
-	// 	if (dlopenRet) {
-	// 		printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
-
-	// 	}
-	// 	else {
-	// 		uint64_t remoteErrorString = 0;
-	// 		arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
-	// 		char *errorString = task_copy_string(task, remoteErrorString);
-	// 		printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
-	// 		free(errorString);
-	// 	}
-	// }
-
 	thread_terminate(pthread);
 }
