@@ -600,7 +600,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		}
 
 		// Patch to: add NOP instructions without breaking the function
-		uint32_t nop_patch[18];
+		uint32_t nop_patch[20];
 
 		// Only replace instructions that are safe to modify
 		nop_patch[0] = original_bytes[0]; 
