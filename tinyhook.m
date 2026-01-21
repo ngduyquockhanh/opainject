@@ -70,8 +70,10 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
     printf("Saving header from %p to %p\n", *src, *dst);
     mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_DEFAULT);
      uint32_t insn;
+    printf("min_len: %d\n", min_len);
     for (int i = 0; i < min_len; i += 4) {
         // Đọc lệnh từ bộ nhớ từ xa
+        printf("Reading instruction at %p\n", *src);
         mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
 
         if (((insn ^ 0x90000000) & 0x9f000000) == 0) {
