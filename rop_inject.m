@@ -42,6 +42,8 @@
 #import "arm64.h"
 #include <mach/vm_map.h>
 
+#include "tinyhook.h"
+
 // Hook Objective-C method in remote process using ROP, similar to hookM
 // Monitor ssl_write using breakpoint + monitor thread
 // Returns 1 if success, 0 if fail
@@ -524,13 +526,6 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			// Patch to: return original SSL_write result without modification
 			// Just preserve the function - NO HOOK for now
 			uint32_t nop_patch[4];
-			
-			// Keep original function intact - just testing if patching works
-			// Option 1: NOP (test only)
-			// nop_patch[0] = 0xD503201F; // NOP
-			// nop_patch[1] = 0xD503201F; // NOP
-			// nop_patch[2] = 0xD503201F; // NOP
-			// nop_patch[3] = 0xD503201F; // NOP
 			
 			// Option 2: Keep original - NO PATCH (safest)
 			nop_patch[0] = original_bytes[0];

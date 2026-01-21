@@ -11,4 +11,10 @@ opainject_CODESIGN_FLAGS = -Sentitlements.plist
 opainject_INSTALL_PATH = /usr/local/bin
 opainject_PRIVATE_FRAMEWORKS = CoreSymbolication
 
+# Add include path for tinyhook.h
+opainject_CFLAGS += -Iinclude
+
+# Link with libtinyhook.a
+opainject_LDFLAGS += libtinyhook.a
+
 include $(THEOS_MAKE_PATH)/tool.mk
