@@ -595,8 +595,8 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 				printf("[DEBUG] SSL*:   0x%016llX\n", ssl_ptr);
 				printf("[DEBUG] buf*:   0x%016llX\n", buf_ptr);
 				printf("[DEBUG] length: %lld bytes\n", buf_len);
-				printf("[DEBUG] PC:     0x%016llX\n", thread_state.__pc);
-				printf("[DEBUG] LR:     0x%016llX\n", thread_state.__lr);
+				printf("[DEBUG] PC:     0x%016llX\n", (uint64_t)__darwin_arm_thread_state64_get_pc(thread_state));
+				printf("[DEBUG] LR:     0x%016llX\n", (uint64_t)__darwin_arm_thread_state64_get_lr(thread_state));
 				
 				// Read buffer data
 				if (buf_ptr && buf_len > 0 && buf_len < 16384) {
@@ -630,7 +630,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 				             (vm_offset_t)&original_insn, 4);
 				
 				// Rewind PC to re-execute original instruction
-				thread_state.__pc = sslWriteAddr;
+				__darwin_arm_thread_state64_set_pc_fptr(thread_state, (void*)sslWriteAddr);
 				thread_set_state(exc_thread, ARM_THREAD_STATE64,
 				                (thread_state_t)&thread_state, state_count);
 				
