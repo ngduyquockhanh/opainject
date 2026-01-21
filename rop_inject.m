@@ -601,7 +601,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			printf("[DEBUG] Saved %d old exception port(s)\n", old_count);
 		}
 		printf("[DEBUG] Hook setup complete - app should continue normally\n");
-	}
+	}*/
 	
 	/* BREAKPOINT APPROACH - DISABLED (causes crashes)
 	// Comment out the entire breakpoint code since it causes app crash
