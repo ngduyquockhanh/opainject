@@ -495,81 +495,81 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
 
-	// printf("Hook!");
-	// 	void *original_function = NULL;
+	printf("Hook!");
+		void *original_function = NULL;
 
-	// 	int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
-	// 	if (result == 0) {
-	// 		printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
-	// 	} else {
-	// 		printf("[hookSSLWriteWithTinyHook] Failed to install hook. Error code: %d\n", result);
+		int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
+		if (result == 0) {
+			printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
+		} else {
+			printf("[hookSSLWriteWithTinyHook] Failed to install hook. Error code: %d\n", result);
+		}
+
+
+	// if (sslWriteAddr) {
+		
+	// 	printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
+		
+	// 	// Simple patch: Make SSL_write return without doing anything
+	// 	// This is safer than trampoline approach for testing
+		
+	// 	thread_act_array_t threads;
+	// 	mach_msg_type_number_t thread_count;
+	// 	kr = task_threads(task, &threads, &thread_count);
+	// 	if (kr == KERN_SUCCESS) {
+	// 		for (int i = 0; i < thread_count; i++) {
+	// 			thread_suspend(threads[i]);
+	// 		}
 	// 	}
-
-
-	if (sslWriteAddr) {
 		
-		printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
+	// 	// Save original bytes first
+	// 	uint32_t original_bytes[4] = {0};
+	// 	vm_size_t read_size = 16;
+	// 	kr = vm_read_overwrite(task, sslWriteAddr, 16, 
+	// 	                      (vm_address_t)original_bytes, &read_size);
+	// 	if (kr == KERN_SUCCESS) {
+	// 		printf("[DEBUG] Original: %08X %08X %08X %08X\n", 
+	// 		       original_bytes[0], original_bytes[1], 
+	// 		       original_bytes[2], original_bytes[3]);
+	// 	}
 		
-		// Simple patch: Make SSL_write return without doing anything
-		// This is safer than trampoline approach for testing
-		
-		thread_act_array_t threads;
-		mach_msg_type_number_t thread_count;
-		kr = task_threads(task, &threads, &thread_count);
-		if (kr == KERN_SUCCESS) {
-			for (int i = 0; i < thread_count; i++) {
-				thread_suspend(threads[i]);
-			}
-		}
-		
-		// Save original bytes first
-		uint32_t original_bytes[4] = {0};
-		vm_size_t read_size = 16;
-		kr = vm_read_overwrite(task, sslWriteAddr, 16, 
-		                      (vm_address_t)original_bytes, &read_size);
-		if (kr == KERN_SUCCESS) {
-			printf("[DEBUG] Original: %08X %08X %08X %08X\n", 
-			       original_bytes[0], original_bytes[1], 
-			       original_bytes[2], original_bytes[3]);
-		}
-		
-		// Make writable
-		kr = vm_protect(task, sslWriteAddr, 16, FALSE,
-		               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-		if (kr == KERN_SUCCESS) {
-			// Patch to: return original SSL_write result without modification
-			// Just preserve the function - NO HOOK for now
-			uint32_t nop_patch[4];
+	// 	// Make writable
+	// 	kr = vm_protect(task, sslWriteAddr, 16, FALSE,
+	// 	               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+	// 	if (kr == KERN_SUCCESS) {
+	// 		// Patch to: return original SSL_write result without modification
+	// 		// Just preserve the function - NO HOOK for now
+	// 		uint32_t nop_patch[4];
 			
-			// Option 2: Keep original - NO PATCH (safest)
-			nop_patch[0] = original_bytes[0];
-			nop_patch[1] = original_bytes[1];
-			nop_patch[2] = original_bytes[2];
-			nop_patch[3] = original_bytes[3];
+	// 		// Option 2: Keep original - NO PATCH (safest)
+	// 		nop_patch[0] = original_bytes[0];
+	// 		nop_patch[1] = original_bytes[1];
+	// 		nop_patch[2] = original_bytes[2];
+	// 		nop_patch[3] = original_bytes[3];
 			
-			kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
-			if (kr == KERN_SUCCESS) {
-				printf("[DEBUG] SSL_write preserved (no modification)\n");
-			} else {
-				printf("[DEBUG] ERROR: Failed to write: %s\n", mach_error_string(kr));
-			}
+	// 		kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
+	// 		if (kr == KERN_SUCCESS) {
+	// 			printf("[DEBUG] SSL_write preserved (no modification)\n");
+	// 		} else {
+	// 			printf("[DEBUG] ERROR: Failed to write: %s\n", mach_error_string(kr));
+	// 		}
 			
-			// Restore executable
-			vm_protect(task, sslWriteAddr, 16, FALSE,
-			          VM_PROT_READ | VM_PROT_EXECUTE);
-		}
+	// 		// Restore executable
+	// 		vm_protect(task, sslWriteAddr, 16, FALSE,
+	// 		          VM_PROT_READ | VM_PROT_EXECUTE);
+	// 	}
 		
-		// Resume threads
-		if (thread_count > 0) {
-			for (int i = 0; i < thread_count; i++) {
-				thread_resume(threads[i]);
-			}
-			vm_deallocate(mach_task_self(), (vm_offset_t)threads,
-			             sizeof(thread_act_array_t) * thread_count);
-		}
+	// 	// Resume threads
+	// 	if (thread_count > 0) {
+	// 		for (int i = 0; i < thread_count; i++) {
+	// 			thread_resume(threads[i]);
+	// 		}
+	// 		vm_deallocate(mach_task_self(), (vm_offset_t)threads,
+	// 		             sizeof(thread_act_array_t) * thread_count);
+	// 	}
 		
-		printf("[DEBUG] Test complete - app should run normally without hook\n");
-	}
+	// 	printf("[DEBUG] Test complete - app should run normally without hook\n");
+	// }
 
 	
 	thread_terminate(pthread);
