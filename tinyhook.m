@@ -1,6 +1,7 @@
 #include "private.h"
 #include <mach/mach_error.h>
 #include <mach/vm_map.h> // vm_*
+#include <stdio.h> // Added to declare printf
 #define mach_vm_address_t  vm_address_t
 #define mach_vm_allocate   vm_allocate
 #define mach_vm_deallocate vm_deallocate
@@ -33,28 +34,23 @@ bool need_far_jump(const void *src, const void *dst) {
 }
 
 static int calc_near_jump(uint8_t *output, void *src, void *dst, bool link) {
-    int jump_size;
-    // b/bl imm    ; go to dst
-    jump_size = 4;
     uint32_t insn = (dst - src) >> 2 & 0x3ffffff;
     insn |= link ? AARCH64_BL : AARCH64_B;
     *(uint32_t *)output = insn;
-
-
+    return 4; // Return the jump size directly
 }
 
 static int calc_far_jump(uint8_t *output, void *src, void *dst, bool link) {
-    int jump_size;
     // adrp    x17, imm
     // add     x17, x17, imm    ; x17 -> dst
     // br/blr  x17
-    jump_size = 12;
     int64_t insn = ((int64_t)dst >> 12) - ((int64_t)src >> 12);
     insn = ((insn & 0x3) << 29) | ((insn & 0x1ffffc) << 3) | AARCH64_ADRP;
     *(uint32_t *)output = insn;
     insn = ((int64_t)dst & 0xfff) << 10 | AARCH64_ADD;
     *(uint32_t *)(output + 4) = insn;
     *(uint32_t *)(output + 8) = link ? AARCH64_BLR : AARCH64_BR;
+    return 12; // Return the jump size directly
 }
 
 static int calc_jump(uint8_t *output, void *src, void *dst, bool link) {
@@ -114,6 +110,8 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
         }
         *src += 4;
     }
+    mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    return;
 
 }
 
