@@ -35,9 +35,11 @@ bool need_far_jump(const void *src, const void *dst) {
 }
 
 static int calc_near_jump(uint8_t *output, void *src, void *dst, bool link) {
+    printf("[calc_near_jump] Calculating near jump from %p to %p\n", src, dst);
     uint32_t insn = (dst - src) >> 2 & 0x3ffffff;
     insn |= link ? AARCH64_BL : AARCH64_B;
     *(uint32_t *)output = insn;
+    printf("[calc_near_jump] Near jump calculation complete.\n");
     return 4; // Return the jump size directly
 }
 
