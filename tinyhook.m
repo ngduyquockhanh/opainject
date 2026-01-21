@@ -74,7 +74,13 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
     for (int i = 0; i < min_len; i += 4) {
         // Đọc lệnh từ bộ nhớ từ xa
         printf("Reading instruction at %p\n", *src);
-        mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
+        printf("[save_header] Attempting to read instruction at %p\n", *src);
+        kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
+        if (kr != KERN_SUCCESS) {
+            printf("[save_header] mach_vm_read_overwrite failed at %p: %s\n", *src, mach_error_string(kr));
+            return; // Exit the function to prevent further crashes
+        }
+        printf("[save_header] Successfully read instruction: 0x%08x\n", insn);
 
         if (((insn ^ 0x90000000) & 0x9f000000) == 0) {
             printf("Patching adrp instruction: 0x%08x\n", insn);
