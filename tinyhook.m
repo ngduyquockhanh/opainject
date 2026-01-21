@@ -93,7 +93,14 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
         
         // Proceed with mach_vm_read_overwrite
         kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
-        if (kr != KERN_SUCCESS) {
+        // Handle potential permission errors for mach_vm_read_overwrite
+        if (kr == KERN_PROTECTION_FAILURE) {
+            printf("[save_header] Permission denied for address %p\n", *src);
+            return;
+        } else if (kr == KERN_INVALID_ADDRESS) {
+            printf("[save_header] Invalid address %p\n", *src);
+            return;
+        } else if (kr != KERN_SUCCESS) {
             printf("[save_header] mach_vm_read_overwrite failed at %p: %s\n", *src, mach_error_string(kr));
             return; // Exit the function to prevent further crashes
         }
