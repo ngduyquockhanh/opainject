@@ -498,19 +498,65 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
 
 	printf("Hook!\n");
-	void *original_function = NULL;
+	// void *original_function = NULL;
 
-	int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslReadAddr, &original_function);
-	if (result == KERN_SUCCESS) {
-		printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
-	} else {
-		printf("[hookSSLWriteWithTinyHook] Failed to install hook. Error code: %d\n", result);
-	}
+	// int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslReadAddr, &original_function);
+	// if (result == KERN_SUCCESS) {
+	// 	printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
+	// } else {
+	// 	printf("[hookSSLWriteWithTinyHook] Failed to install hook. Error code: %d\n", result);
+	// }
+
+
+	// Replace sslReadAddr with shellcode to intercept SSL_write buffer
+    printf("[injectDylibViaRop] Creating shellcode to intercept SSL_write buffer.\n");
+
+    // Define shellcode to read SSL_write buffer and call the original function
+    uint8_t shellcode[] = {
+        0xD1, 0x20, 0x00, 0x58, // LDR X17, [X0] (example instruction to read buffer)
+        0xD6, 0x1F, 0x03, 0xD5, // BR X17 (branch to original function)
+    };
+
+    // Allocate memory for shellcode in the target process
+    vm_address_t shellcodeAddr = 0;
+    kr = vm_allocate(task, &shellcodeAddr, sizeof(shellcode), VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        printf("[injectDylibViaRop] Failed to allocate memory for shellcode: %s\n", mach_error_string(kr));
+        return;
+    }
+
+    // Write shellcode to allocated memory
+    kr = vm_write(task, shellcodeAddr, (vm_offset_t)shellcode, sizeof(shellcode));
+    if (kr != KERN_SUCCESS) {
+        printf("[injectDylibViaRop] Failed to write shellcode to memory: %s\n", mach_error_string(kr));
+        vm_deallocate(task, shellcodeAddr, sizeof(shellcode));
+        return;
+    }
+
+    // Make shellcode executable
+    kr = vm_protect(task, shellcodeAddr, sizeof(shellcode), FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        printf("[injectDylibViaRop] Failed to make shellcode executable: %s\n", mach_error_string(kr));
+        vm_deallocate(task, shellcodeAddr, sizeof(shellcode));
+        return;
+    }
+
+    printf("[injectDylibViaRop] Shellcode created at address: 0x%llX\n", (unsigned long long)shellcodeAddr);
+
+    // Hook SSL_write with the shellcode
+    void *original_function = NULL;
+    int result = tiny_hook(task, (void*)sslWriteAddr, (void*)shellcodeAddr, &original_function);
+    if (result == KERN_SUCCESS) {
+        printf("[injectDylibViaRop] Hook installed successfully with shellcode!\n");
+    } else {
+        printf("[injectDylibViaRop] Failed to install hook with shellcode. Error code: %d\n", result);
+        vm_deallocate(task, shellcodeAddr, sizeof(shellcode));
+    }
 
 
 	// if (sslWriteAddr) {
 		
-	// 	printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
+	// 	printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n);
 		
 	// 	// Simple patch: Make SSL_write return without doing anything
 	// 	// This is safer than trampoline approach for testing
