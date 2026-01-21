@@ -494,7 +494,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
 	if (sslWriteAddr) {
-		printf("Hook!")
+		printf("Hook!");
 		void *original_function = NULL;
 
 		int result = tiny_hook_remote(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
