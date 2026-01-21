@@ -91,8 +91,9 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
         }
         printf("[save_header] Address %p is valid. Region size: %lu, Protection: %d\n", (void *)src_address, (unsigned long)size, info.protection);
         
+        mach_vm_size_t outsize = sizeof(uint32_t);
         // Proceed with mach_vm_read_overwrite
-        kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
+        kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, &outsize);
         // Handle potential permission errors for mach_vm_read_overwrite
         if (kr == KERN_PROTECTION_FAILURE) {
             printf("[save_header] Permission denied for address %p\n", *src);
