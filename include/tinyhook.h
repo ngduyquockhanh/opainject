@@ -23,7 +23,7 @@ typedef struct {
 
 /* inline hook */
 TH_VIS int tiny_hook(void *function, void *destination, void **origin);
-TH_VIS int tiny_hook_remote(mach_port_t remote_task, void *src, void *dst, void **orig);
+TH_VIS int tiny_hook_remote(mach_port_t remote_task, void *function, void *destination, void **origin);
 
 TH_VIS int tiny_hook_ex(th_bak_t *bak, void *function, void *destination, void **origin);
 
