@@ -585,23 +585,22 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		kr = vm_protect(task, sslWriteAddr, 16, FALSE,
 		               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 		if (kr == KERN_SUCCESS) {
-			// Patch to: return original SSL_write result without modification
-			// Just preserve the function - NO HOOK for now
+			// Patch to: add NOP instructions without breaking the function
 			uint32_t nop_patch[4];
-			
-			// Option 2: Keep original - NO PATCH (safest)
-			nop_patch[0] = original_bytes[0];
+
+			// Insert NOPs at specific positions (example: replace some instructions with NOPs)
+			nop_patch[0] = 0xD503201F; // NOP instruction
 			nop_patch[1] = original_bytes[1];
-			nop_patch[2] = original_bytes[2];
+			nop_patch[2] = 0xD503201F; // NOP instruction
 			nop_patch[3] = original_bytes[3];
-			
+
 			kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
 			if (kr == KERN_SUCCESS) {
-				printf("[DEBUG] SSL_write preserved (no modification)\n");
+				printf("[DEBUG] SSL_write patched with NOPs (function preserved)\n");
 			} else {
 				printf("[DEBUG] ERROR: Failed to write: %s\n", mach_error_string(kr));
 			}
-			
+
 			// Restore executable
 			vm_protect(task, sslWriteAddr, 16, FALSE,
 			          VM_PROT_READ | VM_PROT_EXECUTE);
@@ -616,7 +615,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			             sizeof(thread_act_array_t) * thread_count);
 		}
 		
-		printf("[DEBUG] Test complete - app should run normally without hook\n");
+		printf("[DEBUG] Test complete - app should run normally with NOPs\n");
 	}
 
 	
