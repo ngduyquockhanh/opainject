@@ -512,13 +512,24 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		if (kr == KERN_SUCCESS) {
 			printf("[DEBUG] Original instruction: 0x%08X\n", original_insn);
 			
-			// 3. Write BRK #0 instruction
-			uint32_t brk_insn = 0xD4200000;  // BRK #0 (ARM64)
-			kr = vm_write(task, sslWriteAddr, (vm_offset_t)&brk_insn, 4);
-			if (kr == KERN_SUCCESS) {
-				printf("[DEBUG] Breakpoint set successfully\n");
+			// 3. Make memory writable (code segment is normally R-X)
+			kr = vm_protect(task, sslWriteAddr, 4, FALSE, 
+			               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+			if (kr != KERN_SUCCESS) {
+				printf("[DEBUG] ERROR: Failed to make memory writable: %s\n", mach_error_string(kr));
 			} else {
-				printf("[DEBUG] ERROR: Failed to write breakpoint: %s\n", mach_error_string(kr));
+				// 4. Write BRK #0 instruction
+				uint32_t brk_insn = 0xD4200000;  // BRK #0 (ARM64)
+				kr = vm_write(task, sslWriteAddr, (vm_offset_t)&brk_insn, 4);
+				if (kr == KERN_SUCCESS) {
+					printf("[DEBUG] Breakpoint set successfully\n");
+					
+					// Restore executable permission
+					vm_protect(task, sslWriteAddr, 4, FALSE,
+					          VM_PROT_READ | VM_PROT_EXECUTE);
+				} else {
+					printf("[DEBUG] ERROR: Failed to write breakpoint: %s\n", mach_error_string(kr));
+				}
 			}
 		} else {
 			printf("[DEBUG] ERROR: Failed to read original instruction: %s\n", mach_error_string(kr));
