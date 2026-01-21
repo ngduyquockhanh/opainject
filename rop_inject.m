@@ -86,224 +86,6 @@
 #import "arm64.h"
 #include <mach/vm_map.h>
 
-// ============ SSL Write Monitor ============
-
-typedef struct {
-    task_t task;
-    uint64_t ssl_write_addr;
-    bool running;
-    pthread_mutex_t lock;
-    uint64_t call_count;
-} ssl_monitor_state_t;
-
-ssl_monitor_state_t *g_ssl_monitor = NULL;
-
-// Monitor thread - chờ breakpoint hit
-void* ssl_monitor_thread(void *arg) {
-    ssl_monitor_state_t *state = (ssl_monitor_state_t *)arg;
-    
-    printf("[ssl_monitor_thread] Started monitoring\n");
-    
-    while (state->running) {
-        thread_t *threads;
-        mach_msg_type_number_t thread_count;
-        
-        // Get all threads
-        kern_return_t kr = task_threads(state->task, &threads, &thread_count);
-        if (kr != KERN_SUCCESS) {
-            usleep(50000);
-            continue;
-        }
-        
-        for (mach_msg_type_number_t i = 0; i < thread_count; i++) {
-            // Suspend thread to safely read state
-            thread_suspend(threads[i]);
-            
-            arm_thread_state64_t thread_state;
-            mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
-            
-            kr = thread_get_state(threads[i], ARM_THREAD_STATE64,
-                                 (thread_state_t)&thread_state, &state_count);
-            
-            if (kr == KERN_SUCCESS) {
-                // Check if PC at breakpoint (ssl_write)
-                uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(thread_state);
-                
-                if (pc == state->ssl_write_addr) {
-                    pthread_mutex_lock(&state->lock);
-                    state->call_count++;
-                    uint64_t call_num = state->call_count;
-                    pthread_mutex_unlock(&state->lock);
-                    
-                    printf("\n");
-                    printf("╔════════════════════════════════════════╗\n");
-                    printf("║  ssl_write INTERCEPTED (#%lld)         ║\n", call_num);
-                    printf("╚════════════════════════════════════════╝\n");
-                    
-                    // Read arguments from registers
-                    uint64_t ssl_ptr = thread_state.__x[0];      // x0 = SSL*
-                    uint64_t buf_ptr = thread_state.__x[1];      // x1 = buf
-                    uint32_t buf_len = thread_state.__x[2];      // x2 = len
-                    
-                    printf("[+] Thread ID: %d\n", threads[i]);
-                    printf("[+] x0 (SSL*):  0x%llx\n", ssl_ptr);
-                    printf("[+] x1 (buf):   0x%llx\n", buf_ptr);
-                    printf("[+] x2 (len):   %d (0x%x)\n", buf_len, buf_len);
-                    
-                    // Read buffer content from remote process
-                    if (buf_len > 0 && buf_len < 0x1000000) {
-                        uint8_t *buf_data = malloc(buf_len);
-                        vm_size_t actual_size = buf_len;
-                        
-                        kr = vm_read_overwrite(state->task, buf_ptr, buf_len,
-                                              (vm_address_t)buf_data, &actual_size);
-                        
-                        if (kr == KERN_SUCCESS && actual_size > 0) {
-                            // Print hex dump
-                            printf("\n[HEX] Buffer content (first %zu bytes):\n", 
-                                   actual_size > 200 ? 200 : actual_size);
-                            for (vm_size_t j = 0; j < actual_size && j < 200; j++) {
-                                printf("%02x ", buf_data[j]);
-                                if ((j + 1) % 16 == 0) printf("\n");
-                            }
-                            printf("\n");
-                            
-                            // Print ASCII dump
-                            printf("\n[ASCII] Readable content:\n");
-                            for (vm_size_t j = 0; j < actual_size && j < 200; j++) {
-                                uint8_t c = buf_data[j];
-                                if (c >= 32 && c < 127) {
-                                    printf("%c", c);
-                                } else {
-                                    printf(".");
-                                }
-                            }
-                            printf("\n");
-                        } else if (kr != KERN_SUCCESS) {
-                            printf("[ERROR] Failed to read buffer: %s\n", mach_error_string(kr));
-                        }
-                        
-                        free(buf_data);
-                    } else {
-                        printf("[!] Buffer length invalid or too large: %d\n", buf_len);
-                    }
-                    
-                    printf("\n");
-                }
-            }
-            
-            // Resume thread
-            thread_resume(threads[i]);
-        }
-        
-        vm_deallocate(mach_task_self(), (vm_address_t)threads,
-                     thread_count * sizeof(thread_t));
-        
-        usleep(50000);  // Poll every 50ms
-    }
-    
-    printf("[ssl_monitor_thread] Monitor stopped\n");
-    return NULL;
-}
-
-// Setup ssl_write monitoring
-void start_ssl_write_monitor(task_t task, uint64_t ssl_write_addr) {
-    printf("[*] Starting ssl_write monitor at 0x%llx\n", ssl_write_addr);
-    
-    // Allocate monitor state
-    g_ssl_monitor = malloc(sizeof(ssl_monitor_state_t));
-    g_ssl_monitor->task = task;
-    g_ssl_monitor->ssl_write_addr = ssl_write_addr;
-    g_ssl_monitor->running = true;
-    g_ssl_monitor->call_count = 0;
-    pthread_mutex_init(&g_ssl_monitor->lock, NULL);
-    
-    // Set breakpoint at ssl_write (replace first instruction with BRK #0)
-    uint8_t brk_instr[] = {0x00, 0x00, 0x20, 0xd4};  // BRK #0 instruction
-    
-    // First, make the memory writable
-    kern_return_t kr = vm_protect(task, ssl_write_addr, sizeof(brk_instr), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) {
-        printf("[ERROR] Failed to change memory protection: %s\n", mach_error_string(kr));
-        free(g_ssl_monitor);
-        g_ssl_monitor = NULL;
-        return;
-    }
-    
-    kr = vm_write(task, ssl_write_addr, (vm_offset_t)brk_instr, sizeof(brk_instr));
-    if (kr != KERN_SUCCESS) {
-        printf("[ERROR] Failed to set breakpoint: %s\n", mach_error_string(kr));
-        free(g_ssl_monitor);
-        g_ssl_monitor = NULL;
-        return;
-    }
-    
-    // Restore executable permissions
-    kr = vm_protect(task, ssl_write_addr, sizeof(brk_instr), FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) {
-        printf("[WARNING] Failed to restore memory protection: %s\n", mach_error_string(kr));
-    }
-    
-    printf("[+] Breakpoint set at 0x%llx\n", ssl_write_addr);
-    
-    // Start monitor thread
-    pthread_t monitor_tid;
-    int pthread_kr = pthread_create(&monitor_tid, NULL, ssl_monitor_thread, g_ssl_monitor);
-    if (pthread_kr != 0) {
-        printf("[ERROR] Failed to create monitor thread: %d\n", pthread_kr);
-        free(g_ssl_monitor);
-        g_ssl_monitor = NULL;
-        return;
-    }
-    
-    printf("[+] Monitor thread created (tid: %p)\n", (void*)monitor_tid);
-
-    printf("[+] ssl_write monitoring active!\n");
-}
-
-// Stop monitoring
-void stop_ssl_write_monitor() {
-    if (g_ssl_monitor) {
-        printf("[*] Stopping ssl_write monitor...\n");
-        g_ssl_monitor->running = false;
-        usleep(200000);
-        
-        pthread_mutex_destroy(&g_ssl_monitor->lock);
-        printf("[+] Monitor stopped. Total calls: %lld\n", g_ssl_monitor->call_count);
-        
-        free(g_ssl_monitor);
-        g_ssl_monitor = NULL;
-    }
-}
-
-void monitorSSLWriteInTarget(task_t task, pid_t pid, vm_address_t allImageInfoAddr)
-{
-	printf("[monitorSSLWriteInTarget] Starting SSL write monitoring\n");
-
-	// Find libboringssl
-	vm_address_t libBorringSSL = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
-	if (!libBorringSSL) {
-		printf("[ERROR] Failed to find libboringssl.dylib\n");
-		return;
-	}
-
-	// Find ssl_write function
-	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "_SSL_write");
-	if (!sslWriteAddr) {
-		printf("[ERROR] Failed to find SSL_write\n");
-		return;
-	}
-
-	printf("[+] libboringssl found at 0x%lx\n", libBorringSSL);
-	printf("[+] SSL_write found at 0x%llx\n", sslWriteAddr);
-
-	// Start monitoring
-	start_ssl_write_monitor(task, sslWriteAddr);
-
-	printf("[+] Monitor is running! Press Ctrl+C to stop...\n");
-	printf("[+] Any calls to ssl_write will be intercepted and logged\n");
-}
-
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
 {
@@ -708,7 +490,172 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 
-	monitorSSLWriteInTarget(task, pid, allImageInfoAddr);
+	// === BREAKPOINT DEBUG: Monitor SSL_write ===
+	if (sslWriteAddr) {
+		printf("[DEBUG] Setting breakpoint at SSL_write: 0x%llX\n", sslWriteAddr);
+		
+		// 1. Suspend all threads
+		thread_act_array_t threads;
+		mach_msg_type_number_t thread_count;
+		kr = task_threads(task, &threads, &thread_count);
+		if (kr == KERN_SUCCESS) {
+			for (int i = 0; i < thread_count; i++) {
+				thread_suspend(threads[i]);
+			}
+		}
+		
+		// 2. Save original instruction (ARM64 = 4 bytes)
+		uint32_t original_insn = 0;
+		mach_vm_size_t read_size = 0;
+		kr = mach_vm_read_overwrite(task, sslWriteAddr, 4, 
+		                            (mach_vm_address_t)&original_insn, &read_size);
+		if (kr == KERN_SUCCESS) {
+			printf("[DEBUG] Original instruction: 0x%08X\n", original_insn);
+			
+			// 3. Write BRK #0 instruction
+			uint32_t brk_insn = 0xD4200000;  // BRK #0 (ARM64)
+			kr = mach_vm_write(task, sslWriteAddr, (vm_offset_t)&brk_insn, 4);
+			if (kr == KERN_SUCCESS) {
+				printf("[DEBUG] Breakpoint set successfully\n");
+			} else {
+				printf("[DEBUG] ERROR: Failed to write breakpoint: %s\n", mach_error_string(kr));
+			}
+		} else {
+			printf("[DEBUG] ERROR: Failed to read original instruction: %s\n", mach_error_string(kr));
+		}
+		
+		// 4. Setup exception port to receive breakpoint exceptions
+		mach_port_t exception_port = MACH_PORT_NULL;
+		kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exception_port);
+		if (kr == KERN_SUCCESS) {
+			kr = mach_port_insert_right(mach_task_self(), exception_port, 
+			                            exception_port, MACH_MSG_TYPE_MAKE_SEND);
+			if (kr == KERN_SUCCESS) {
+				exception_mask_t mask = EXC_MASK_BREAKPOINT | EXC_MASK_BAD_INSTRUCTION;
+				kr = task_set_exception_ports(task, mask, exception_port,
+				                              EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES,
+				                              ARM_THREAD_STATE64);
+				if (kr == KERN_SUCCESS) {
+					printf("[DEBUG] Exception port configured: 0x%X\n", exception_port);
+				} else {
+					printf("[DEBUG] ERROR: Failed to set exception ports: %s\n", mach_error_string(kr));
+				}
+			}
+		}
+		
+		// 5. Resume threads
+		if (thread_count > 0) {
+			for (int i = 0; i < thread_count; i++) {
+				thread_resume(threads[i]);
+			}
+			vm_deallocate(mach_task_self(), (vm_offset_t)threads, 
+			             sizeof(thread_act_array_t) * thread_count);
+		}
+		
+		// 6. Wait for exception (breakpoint hit)
+		printf("[DEBUG] Waiting for SSL_write to be called...\n");
+		
+		struct {
+			mach_msg_header_t head;
+			mach_msg_body_t body;
+			mach_msg_port_descriptor_t thread_port;
+			mach_msg_port_descriptor_t task_port;
+			NDR_record_t ndr;
+			exception_type_t exception;
+			mach_msg_type_number_t code_count;
+			int64_t code[2];
+			int flavor;
+			mach_msg_type_number_t state_count;
+			natural_t state[ARM_THREAD_STATE64_COUNT];
+			mach_msg_trailer_t trailer;
+		} exc_msg;
+		
+		kr = mach_msg(&exc_msg.head, MACH_RCV_MSG | MACH_RCV_LARGE, 0,
+		             sizeof(exc_msg), exception_port,
+		             30000,  // 30 second timeout
+		             MACH_PORT_NULL);
+		
+		if (kr == KERN_SUCCESS && exc_msg.exception == EXC_BREAKPOINT) {
+			printf("\n[DEBUG] ===== BREAKPOINT HIT: SSL_write called! =====\n");
+			
+			// Extract thread and get registers
+			thread_t exc_thread = exc_msg.thread_port.name;
+			arm_thread_state64_t thread_state;
+			mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
+			
+			kr = thread_get_state(exc_thread, ARM_THREAD_STATE64,
+			                     (thread_state_t)&thread_state, &state_count);
+			if (kr == KERN_SUCCESS) {
+				// SSL_write(SSL *ssl, const void *buf, int num)
+				// X0 = SSL*, X1 = buf, X2 = num
+				uint64_t ssl_ptr = thread_state.__x[0];
+				uint64_t buf_ptr = thread_state.__x[1];
+				uint64_t buf_len = thread_state.__x[2];
+				
+				printf("[DEBUG] SSL*:   0x%016llX\n", ssl_ptr);
+				printf("[DEBUG] buf*:   0x%016llX\n", buf_ptr);
+				printf("[DEBUG] length: %lld bytes\n", buf_len);
+				printf("[DEBUG] PC:     0x%016llX\n", thread_state.__pc);
+				printf("[DEBUG] LR:     0x%016llX\n", thread_state.__lr);
+				
+				// Read buffer data
+				if (buf_ptr && buf_len > 0 && buf_len < 16384) {
+					char *buffer = malloc(buf_len + 1);
+					if (buffer) {
+						mach_vm_size_t read_size = 0;
+						kr = mach_vm_read_overwrite(task, buf_ptr, buf_len,
+						                            (mach_vm_address_t)buffer, &read_size);
+						if (kr == KERN_SUCCESS) {
+							buffer[buf_len] = '\0';
+							printf("\n[DEBUG] ===== BUFFER CONTENT =====\n");
+							printf("%.*s\n", (int)buf_len, buffer);
+							printf("[DEBUG] =============================\n\n");
+							
+							// Hex dump for binary data
+							printf("[DEBUG] Hex dump:\n");
+							for (int i = 0; i < buf_len && i < 256; i += 16) {
+								printf("  %04X: ", i);
+								for (int j = 0; j < 16 && (i+j) < buf_len; j++) {
+									printf("%02X ", (unsigned char)buffer[i+j]);
+								}
+								printf("\n");
+							}
+						}
+						free(buffer);
+					}
+				}
+				
+				// Restore original instruction
+				kr = mach_vm_write(task, sslWriteAddr, 
+				                  (vm_offset_t)&original_insn, 4);
+				
+				// Rewind PC to re-execute original instruction
+				thread_state.__pc = sslWriteAddr;
+				thread_set_state(exc_thread, ARM_THREAD_STATE64,
+				                (thread_state_t)&thread_state, state_count);
+				
+				printf("[DEBUG] Restored instruction and rewound PC\n");
+			}
+			
+			// Reply to exception to resume execution
+			mach_msg_header_t reply;
+			reply.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+			reply.msgh_remote_port = exc_msg.head.msgh_remote_port;
+			reply.msgh_local_port = MACH_PORT_NULL;
+			reply.msgh_id = exc_msg.head.msgh_id + 100;
+			reply.msgh_size = sizeof(reply);
+			
+			mach_msg(&reply, MACH_SEND_MSG, sizeof(reply), 0,
+			        MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+			
+			printf("[DEBUG] Execution resumed\n");
+		} else if (kr == MACH_RCV_TIMED_OUT) {
+			printf("[DEBUG] Timeout: SSL_write not called within 30 seconds\n");
+		} else {
+			printf("[DEBUG] ERROR: mach_msg failed: %s\n", mach_error_string(kr));
+		}
+	}
+	
 	// // FIND OFFSETS
 	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
 	// uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen_from");
