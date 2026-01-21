@@ -490,7 +490,99 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 
-	// === BREAKPOINT DEBUG: Monitor SSL_write ===
+	// === SIMPLE INLINE HOOK: Replace SSL_write with custom function ===
+	if (sslWriteAddr) {
+		printf("[DEBUG] Hooking SSL_write at 0x%llX\n", sslWriteAddr);
+		
+		// Allocate memory for hook function in remote process
+		vm_address_t hook_addr = (vm_address_t)NULL;
+		size_t hook_size = 4096; // 1 page
+		kr = vm_allocate(task, &hook_addr, hook_size, VM_FLAGS_ANYWHERE);
+		if (kr != KERN_SUCCESS) {
+			printf("[DEBUG] ERROR: Failed to allocate hook memory: %s\n", mach_error_string(kr));
+		} else {
+			kr = vm_protect(task, hook_addr, hook_size, FALSE,
+			               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+			if (kr == KERN_SUCCESS) {
+				printf("[DEBUG] Allocated hook memory at 0x%llX\n", (unsigned long long)hook_addr);
+				
+				// Build hook shellcode (ARM64)
+				// Simple version: just call original function for now
+				uint32_t shellcode[16];
+				int idx = 0;
+				
+				// Save original instruction we're replacing
+				uint32_t original_insn = 0;
+				vm_size_t read_size = 4;
+				vm_read_overwrite(task, sslWriteAddr, 4, 
+				                 (vm_address_t)&original_insn, &read_size);
+				printf("[DEBUG] Original instruction: 0x%08X\n", original_insn);
+				
+				// Hook stub: Log and jump to original + 4
+				// For simplicity, just redirect to original function + 4
+				int64_t offset = (sslWriteAddr + 4) - hook_addr;
+				
+				// B <offset> - branch to original+4
+				shellcode[idx++] = 0x14000000 | ((offset / 4) & 0x03FFFFFF);
+				
+				// Write shellcode to remote memory
+				kr = vm_write(task, hook_addr, (vm_offset_t)shellcode, idx * 4);
+				if (kr != KERN_SUCCESS) {
+					printf("[DEBUG] ERROR: Failed to write shellcode: %s\n", mach_error_string(kr));
+				} else {
+					// Now patch SSL_write to jump to our hook
+					thread_act_array_t threads;
+					mach_msg_type_number_t thread_count;
+					kr = task_threads(task, &threads, &thread_count);
+					if (kr == KERN_SUCCESS) {
+						for (int i = 0; i < thread_count; i++) {
+							thread_suspend(threads[i]);
+						}
+					}
+					
+					// Make SSL_write writable
+					kr = vm_protect(task, sslWriteAddr, 4, FALSE,
+					               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+					if (kr == KERN_SUCCESS) {
+						// Calculate offset from SSL_write to hook
+						offset = hook_addr - sslWriteAddr;
+						uint32_t branch_insn = 0x14000000 | ((offset / 4) & 0x03FFFFFF);
+						
+						// Write branch instruction
+						kr = vm_write(task, sslWriteAddr, (vm_offset_t)&branch_insn, 4);
+						if (kr == KERN_SUCCESS) {
+							printf("[DEBUG] Hook installed successfully\n");
+							printf("[DEBUG] Branch instruction: 0x%08X (offset: %lld)\n", 
+							       branch_insn, offset);
+						} else {
+							printf("[DEBUG] ERROR: Failed to write branch: %s\n", 
+							       mach_error_string(kr));
+						}
+						
+						// Restore executable permission
+						vm_protect(task, sslWriteAddr, 4, FALSE,
+						          VM_PROT_READ | VM_PROT_EXECUTE);
+					} else {
+						printf("[DEBUG] ERROR: Failed to make writable: %s\n",
+						       mach_error_string(kr));
+					}
+					
+					// Resume threads
+					if (thread_count > 0) {
+						for (int i = 0; i < thread_count; i++) {
+							thread_resume(threads[i]);
+						}
+						vm_deallocate(mach_task_self(), (vm_offset_t)threads,
+						             sizeof(thread_act_array_t) * thread_count);
+					}
+				}
+			}
+		}
+		
+		printf("[DEBUG] Hook setup complete - app should continue normally\n");
+	}
+	
+	/* BREAKPOINT APPROACH - DISABLED (causes crashes)
 	if (sslWriteAddr) {
 		printf("[DEBUG] Setting breakpoint at SSL_write: 0x%llX\n", sslWriteAddr);
 		
@@ -508,230 +600,13 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		if (kr == KERN_SUCCESS) {
 			printf("[DEBUG] Saved %d old exception port(s)\n", old_count);
 		}
-		
-		// 2. Suspend all threads
-		thread_act_array_t threads;
-		mach_msg_type_number_t thread_count;
-		kr = task_threads(task, &threads, &thread_count);
-		if (kr == KERN_SUCCESS) {
-			for (int i = 0; i < thread_count; i++) {
-				thread_suspend(threads[i]);
-			}
-		}
-		
-		// 3. Save original instruction (ARM64 = 4 bytes)
-		uint32_t original_insn = 0;
-		vm_size_t read_size = 4;
-		kr = vm_read_overwrite(task, sslWriteAddr, 4, 
-		                      (vm_address_t)&original_insn, &read_size);
-		if (kr == KERN_SUCCESS) {
-			printf("[DEBUG] Original instruction: 0x%08X\n", original_insn);
-			
-			// 4. Make memory writable (code segment is normally R-X)
-			kr = vm_protect(task, sslWriteAddr, 4, FALSE, 
-			               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-			if (kr != KERN_SUCCESS) {
-				printf("[DEBUG] ERROR: Failed to make memory writable: %s\n", mach_error_string(kr));
-			} else {
-				// 5. Write BRK #0 instruction
-				uint32_t brk_insn = 0xD4200000;  // BRK #0 (ARM64)
-				kr = vm_write(task, sslWriteAddr, (vm_offset_t)&brk_insn, 4);
-				if (kr == KERN_SUCCESS) {
-					printf("[DEBUG] Breakpoint set successfully\n");
-					
-					// Restore executable permission
-					vm_protect(task, sslWriteAddr, 4, FALSE,
-					          VM_PROT_READ | VM_PROT_EXECUTE);
-				} else {
-					printf("[DEBUG] ERROR: Failed to write breakpoint: %s\n", mach_error_string(kr));
-				}
-			}
-		} else {
-			printf("[DEBUG] ERROR: Failed to read original instruction: %s\n", mach_error_string(kr));
-		}
-		
-		// 6. Setup exception port to receive breakpoint exceptions
-		mach_port_t exception_port = MACH_PORT_NULL;
-		kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exception_port);
-		if (kr == KERN_SUCCESS) {
-			kr = mach_port_insert_right(mach_task_self(), exception_port, 
-			                            exception_port, MACH_MSG_TYPE_MAKE_SEND);
-			if (kr == KERN_SUCCESS) {
-				exception_mask_t mask = EXC_MASK_BREAKPOINT | EXC_MASK_BAD_INSTRUCTION;
-				kr = task_set_exception_ports(task, mask, exception_port,
-				                              EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES,
-				                              ARM_THREAD_STATE64);
-				if (kr == KERN_SUCCESS) {
-					printf("[DEBUG] Exception port configured: 0x%X\n", exception_port);
-				} else {
-					printf("[DEBUG] ERROR: Failed to set exception ports: %s\n", mach_error_string(kr));
-				}
-			}
-		}
-		
-		// 7. Resume threads - IMPORTANT: app must continue running
-		if (thread_count > 0) {
-			for (int i = 0; i < thread_count; i++) {
-				thread_resume(threads[i]);
-			}
-			vm_deallocate(mach_task_self(), (vm_offset_t)threads, 
-			             sizeof(thread_act_array_t) * thread_count);
-		}
-		
-		printf("[DEBUG] Waiting for SSL_write to be called (30s timeout)...\n");
-		printf("[DEBUG] App should continue running normally...\n");
-		
-		// 8. Wait for exception with proper message structure
-		union {
-			mach_msg_header_t head;
-			char data[1024];
-		} recv_msg, reply_msg;
-		
-		kr = mach_msg(&recv_msg.head, 
-		             MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-		             0,
-		             sizeof(recv_msg),
-		             exception_port,
-		             30000,  // 30 second timeout
-		             MACH_PORT_NULL);
-		
-		if (kr == KERN_SUCCESS) {
-			printf("\n[DEBUG] ===== EXCEPTION RECEIVED! =====\n");
-			printf("[DEBUG] Message ID: %d, size: %d\n", 
-			       recv_msg.head.msgh_id, recv_msg.head.msgh_size);
-			
-			// Parse exception (simplified - assume it's our breakpoint)
-			// Extract thread port from message
-			mach_port_t exc_thread = recv_msg.head.msgh_remote_port;
-			
-			if (exc_thread != MACH_PORT_NULL) {
-				arm_thread_state64_t thread_state;
-				mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
-				
-				kr = thread_get_state(exc_thread, ARM_THREAD_STATE64,
-				                     (thread_state_t)&thread_state, &state_count);
-				if (kr == KERN_SUCCESS) {
-					// SSL_write(SSL *ssl, const void *buf, int num)
-					// X0 = SSL*, X1 = buf, X2 = num
-					uint64_t ssl_ptr = thread_state.__x[0];
-					uint64_t buf_ptr = thread_state.__x[1];
-					uint64_t buf_len = thread_state.__x[2];
-					
-					printf("[DEBUG] SSL*:   0x%016llX\n", ssl_ptr);
-					printf("[DEBUG] buf*:   0x%016llX\n", buf_ptr);
-					printf("[DEBUG] length: %lld bytes\n", buf_len);
-					printf("[DEBUG] PC:     0x%016llX\n", (uint64_t)__darwin_arm_thread_state64_get_pc(thread_state));
-					printf("[DEBUG] LR:     0x%016llX\n", (uint64_t)__darwin_arm_thread_state64_get_lr(thread_state));
-					
-					// Read buffer data
-					if (buf_ptr && buf_len > 0 && buf_len < 16384) {
-						char *buffer = malloc(buf_len + 1);
-						if (buffer) {
-							vm_size_t read_size = buf_len;
-							kr = vm_read_overwrite(task, buf_ptr, buf_len,
-							                      (vm_address_t)buffer, &read_size);
-							if (kr == KERN_SUCCESS) {
-								buffer[buf_len] = '\0';
-								printf("\n[DEBUG] ===== BUFFER CONTENT =====\n");
-								printf("%.*s\n", (int)buf_len, buffer);
-								printf("[DEBUG] =============================\n\n");
-								
-								// Hex dump for binary data
-								printf("[DEBUG] Hex dump (first 256 bytes):\n");
-								for (int i = 0; i < buf_len && i < 256; i += 16) {
-									printf("  %04X: ", i);
-									for (int j = 0; j < 16 && (i+j) < buf_len; j++) {
-										printf("%02X ", (unsigned char)buffer[i+j]);
-									}
-									printf("\n");
-								}
-							}
-							free(buffer);
-						}
-					}
-					
-					// Restore original instruction
-					thread_suspend(exc_thread);
-					vm_protect(task, sslWriteAddr, 4, FALSE,
-					          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-					kr = vm_write(task, sslWriteAddr, 
-					             (vm_offset_t)&original_insn, 4);
-					vm_protect(task, sslWriteAddr, 4, FALSE,
-					          VM_PROT_READ | VM_PROT_EXECUTE);
-					
-					// Rewind PC to re-execute original instruction
-					__darwin_arm_thread_state64_set_pc_fptr(thread_state, (void*)sslWriteAddr);
-					thread_set_state(exc_thread, ARM_THREAD_STATE64,
-					                (thread_state_t)&thread_state, state_count);
-					
-					thread_resume(exc_thread);
-					printf("[DEBUG] Restored instruction and rewound PC\n");
-				}
-			}
-			
-			// Send reply to kernel (CRITICAL: must reply or process hangs/crashes)
-			reply_msg.head.msgh_bits = MACH_MSGH_BITS_REMOTE(recv_msg.head.msgh_bits);
-			reply_msg.head.msgh_remote_port = recv_msg.head.msgh_remote_port;
-			reply_msg.head.msgh_local_port = MACH_PORT_NULL;
-			reply_msg.head.msgh_id = recv_msg.head.msgh_id + 100;
-			reply_msg.head.msgh_size = sizeof(mach_msg_header_t) + sizeof(kern_return_t);
-			
-			// Add return code (KERN_SUCCESS)
-			*(kern_return_t*)(&reply_msg.data[0]) = KERN_SUCCESS;
-			
-			kr = mach_msg(&reply_msg.head, 
-			             MACH_SEND_MSG,
-			             reply_msg.head.msgh_size,
-			             0,
-			             MACH_PORT_NULL,
-			             MACH_MSG_TIMEOUT_NONE,
-			             MACH_PORT_NULL);
-			
-			if (kr == KERN_SUCCESS) {
-				printf("[DEBUG] Exception handled, execution resumed\n");
-			} else {
-				printf("[DEBUG] ERROR: Failed to send reply: %s\n", mach_error_string(kr));
-			}
-			
-		} else if (kr == MACH_RCV_TIMED_OUT) {
-			printf("[DEBUG] Timeout: SSL_write not called within 30 seconds\n");
-			printf("[DEBUG] Restoring original instruction...\n");
-			
-			// Suspend threads and restore
-			kr = task_threads(task, &threads, &thread_count);
-			if (kr == KERN_SUCCESS) {
-				for (int i = 0; i < thread_count; i++) {
-					thread_suspend(threads[i]);
-				}
-				
-				vm_protect(task, sslWriteAddr, 4, FALSE,
-				          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-				vm_write(task, sslWriteAddr, (vm_offset_t)&original_insn, 4);
-				vm_protect(task, sslWriteAddr, 4, FALSE,
-				          VM_PROT_READ | VM_PROT_EXECUTE);
-				
-				for (int i = 0; i < thread_count; i++) {
-					thread_resume(threads[i]);
-				}
-				vm_deallocate(mach_task_self(), (vm_offset_t)threads, 
-				             sizeof(thread_act_array_t) * thread_count);
-			}
-		} else {
-			printf("[DEBUG] ERROR: mach_msg failed: %s\n", mach_error_string(kr));
-		}
-		
-		// 9. Restore old exception ports
-		for (int i = 0; i < old_count; i++) {
-			task_set_exception_ports(task, old_masks[i], old_ports[i],
-			                        old_behaviors[i], old_flavors[i]);
-		}
-		printf("[DEBUG] Restored old exception port(s)\n");
-		
-		// Cleanup
-		if (exception_port != MACH_PORT_NULL) {
-			mach_port_deallocate(mach_task_self(), exception_port);
-		}
+		printf("[DEBUG] Hook setup complete - app should continue normally\n");
 	}
+	
+	/* BREAKPOINT APPROACH - DISABLED (causes crashes)
+	// Comment out the entire breakpoint code since it causes app crash
+	// due to exception port conflicts and complex message handling
+	*/
 	
 	// // FIND OFFSETS
 	// vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
