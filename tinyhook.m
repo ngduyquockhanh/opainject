@@ -1,7 +1,6 @@
 #include "private.h"
 #include <mach/mach_error.h>
 #include <mach/vm_map.h> // vm_*
-#include <mach/mach_vm.h> // Added for mach_vm_region and related functions
 #include <stdio.h> // Added to declare printf
 #define mach_vm_address_t  vm_address_t
 #define mach_vm_allocate   vm_allocate
