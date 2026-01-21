@@ -113,6 +113,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
         *src += 4;
     }
     mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    prinf("Header saved, new src: %p, new dst: %p\n", *src, *dst);
     return;
 
 }
