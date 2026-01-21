@@ -688,7 +688,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		// Jump back to SSL_write + 16
 		uint64_t returnAddr = sslWriteAddr + 16;
 		// Load address to x16 then branch
-		uint64_t offset_to_return = returnAddr - trampolineAddr;
+		// uint64_t offset_to_return = returnAddr - trampolineAddr;
 		
 		// Use absolute jump with movk sequence
 		trampoline[tidx++] = 0xD2800010 | (((returnAddr >> 0) & 0xFFFF) << 5);  // movz x16, #imm
@@ -740,8 +740,8 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			kr = vm_write(task, sslWriteAddr, (vm_offset_t)jumpPatch, 16);
 			if (kr == KERN_SUCCESS) {
 				printf("[DEBUG] SSL_write hooked successfully!\n");
-				printf("[DEBUG] Hook at: 0x%llX\n", hookRegion);
-				printf("[DEBUG] Storage at: 0x%llX\n", storageArea);
+				printf("[DEBUG] Hook at: 0x%lX\n", (unsigned long)hookRegion);
+				printf("[DEBUG] Storage at: 0x%lX\n", (unsigned long)storageArea);
 			}
 			vm_protect(task, sslWriteAddr, 16, FALSE,
 					VM_PROT_READ | VM_PROT_EXECUTE);
