@@ -589,9 +589,9 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			uint32_t nop_patch[4];
 
 			// Insert NOPs at specific positions (example: replace some instructions with NOPs)
-			nop_patch[0] = 0xD503201F; // NOP instruction
+			nop_patch[0] = original_bytes[0]; // NOP instruction
 			nop_patch[1] = original_bytes[1];
-			nop_patch[2] = 0xD503201F; // NOP instruction
+			nop_patch[2] = original_bytes[2]; // NOP instruction
 			nop_patch[3] = original_bytes[3];
 
 			kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
