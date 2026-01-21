@@ -490,118 +490,86 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 
-	// === INLINE HOOK: Trampoline approach for 64-bit addresses ===
+	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
 	if (sslWriteAddr) {
-		printf("[DEBUG] Hooking SSL_write at 0x%llX\n", sslWriteAddr);
+		printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
 		
-		// Save original bytes from SSL_write (we need 16 bytes for trampoline)
+		// Simple patch: Make SSL_write return without doing anything
+		// This is safer than trampoline approach for testing
+		
+		thread_act_array_t threads;
+		mach_msg_type_number_t thread_count;
+		kr = task_threads(task, &threads, &thread_count);
+		if (kr == KERN_SUCCESS) {
+			for (int i = 0; i < thread_count; i++) {
+				thread_suspend(threads[i]);
+			}
+		}
+		
+		// Save original bytes first
 		uint32_t original_bytes[4] = {0};
 		vm_size_t read_size = 16;
 		kr = vm_read_overwrite(task, sslWriteAddr, 16, 
 		                      (vm_address_t)original_bytes, &read_size);
 		if (kr == KERN_SUCCESS) {
-			printf("[DEBUG] Original bytes: %08X %08X %08X %08X\n", 
+			printf("[DEBUG] Original: %08X %08X %08X %08X\n", 
 			       original_bytes[0], original_bytes[1], 
 			       original_bytes[2], original_bytes[3]);
 		}
 		
-		// Allocate memory for trampoline (stores original code + jump back)
-		vm_address_t trampoline_addr = (vm_address_t)NULL;
-		size_t trampoline_size = 4096;
-		kr = vm_allocate(task, &trampoline_addr, trampoline_size, VM_FLAGS_ANYWHERE);
-		if (kr != KERN_SUCCESS) {
-			printf("[DEBUG] ERROR: Failed to allocate trampoline: %s\n", mach_error_string(kr));
-		} else {
-			kr = vm_protect(task, trampoline_addr, trampoline_size, FALSE,
-			               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+		// Make writable
+		kr = vm_protect(task, sslWriteAddr, 16, FALSE,
+		               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+		if (kr == KERN_SUCCESS) {
+			// Patch to: return original SSL_write result without modification
+			// Just preserve the function - NO HOOK for now
+			uint32_t nop_patch[4];
+			
+			// Keep original function intact - just testing if patching works
+			// Option 1: NOP (test only)
+			// nop_patch[0] = 0xD503201F; // NOP
+			// nop_patch[1] = 0xD503201F; // NOP
+			// nop_patch[2] = 0xD503201F; // NOP
+			// nop_patch[3] = 0xD503201F; // NOP
+			
+			// Option 2: Keep original - NO PATCH (safest)
+			nop_patch[0] = original_bytes[0];
+			nop_patch[1] = original_bytes[1];
+			nop_patch[2] = original_bytes[2];
+			nop_patch[3] = original_bytes[3];
+			
+			kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
 			if (kr == KERN_SUCCESS) {
-				printf("[DEBUG] Allocated trampoline at 0x%llX\n", (unsigned long long)trampoline_addr);
-				
-				// Build trampoline:
-				// 1. Execute original instructions
-				// 2. Load address of SSL_write+16 into register
-				// 3. Branch to it (continue original function)
-				uint32_t trampoline[16];
-				int idx = 0;
-				
-				// Copy original 4 instructions
-				trampoline[idx++] = original_bytes[0];
-				trampoline[idx++] = original_bytes[1];
-				trampoline[idx++] = original_bytes[2];
-				trampoline[idx++] = original_bytes[3];
-				
-				// Load return address (SSL_write+16) into x16
-				uint64_t return_addr = sslWriteAddr + 16;
-				// LDR x16, #8  - load from PC+8
-				trampoline[idx++] = 0x58000050;
-				// BR x16 - branch to x16
-				trampoline[idx++] = 0xD61F0200;
-				// Address data (little-endian 64-bit)
-				trampoline[idx++] = (uint32_t)(return_addr & 0xFFFFFFFF);
-				trampoline[idx++] = (uint32_t)(return_addr >> 32);
-				
-				// Write trampoline
-				kr = vm_write(task, trampoline_addr, (vm_offset_t)trampoline, idx * 4);
-				if (kr != KERN_SUCCESS) {
-					printf("[DEBUG] ERROR: Failed to write trampoline: %s\n", mach_error_string(kr));
-				} else {
-					printf("[DEBUG] Trampoline written successfully\n");
-					
-					// Now patch SSL_write with jump to trampoline
-					// We'll use 16 bytes (4 instructions) at SSL_write:
-					// LDR x16, #8
-					// BR x16
-					// .quad trampoline_addr
-					
-					thread_act_array_t threads;
-					mach_msg_type_number_t thread_count;
-					kr = task_threads(task, &threads, &thread_count);
-					if (kr == KERN_SUCCESS) {
-						for (int i = 0; i < thread_count; i++) {
-							thread_suspend(threads[i]);
-						}
-					}
-					
-					// Make SSL_write writable
-					kr = vm_protect(task, sslWriteAddr, 16, FALSE,
-					               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-					if (kr == KERN_SUCCESS) {
-						uint32_t hook_stub[4];
-						// LDR x16, #8
-						hook_stub[0] = 0x58000050;
-						// BR x16
-						hook_stub[1] = 0xD61F0200;
-						// Address (little-endian)
-						hook_stub[2] = (uint32_t)(trampoline_addr & 0xFFFFFFFF);
-						hook_stub[3] = (uint32_t)(trampoline_addr >> 32);
-						
-						kr = vm_write(task, sslWriteAddr, (vm_offset_t)hook_stub, 16);
-						if (kr == KERN_SUCCESS) {
-							printf("[DEBUG] Hook stub installed at SSL_write\n");
-							printf("[DEBUG] Jump to trampoline: 0x%llX\n", (unsigned long long)trampoline_addr);
-						} else {
-							printf("[DEBUG] ERROR: Failed to write hook stub: %s\n", mach_error_string(kr));
-						}
-						
-						// Restore executable permission
-						vm_protect(task, sslWriteAddr, 16, FALSE,
-						          VM_PROT_READ | VM_PROT_EXECUTE);
-					}
-					
-					// Resume threads
-					if (thread_count > 0) {
-						for (int i = 0; i < thread_count; i++) {
-							thread_resume(threads[i]);
-						}
-						vm_deallocate(mach_task_self(), (vm_offset_t)threads,
-						             sizeof(thread_act_array_t) * thread_count);
-					}
-				}
+				printf("[DEBUG] SSL_write preserved (no modification)\n");
+			} else {
+				printf("[DEBUG] ERROR: Failed to write: %s\n", mach_error_string(kr));
 			}
+			
+			// Restore executable
+			vm_protect(task, sslWriteAddr, 16, FALSE,
+			          VM_PROT_READ | VM_PROT_EXECUTE);
 		}
 		
-		printf("[DEBUG] Hook setup complete - app should continue normally\n");
+		// Resume threads
+		if (thread_count > 0) {
+			for (int i = 0; i < thread_count; i++) {
+				thread_resume(threads[i]);
+			}
+			vm_deallocate(mach_task_self(), (vm_offset_t)threads,
+			             sizeof(thread_act_array_t) * thread_count);
+		}
+		
+		printf("[DEBUG] Test complete - app should run normally without hook\n");
 	}
+	
+	/* TRAMPOLINE HOOK - DISABLED (causes crash due to stack frame corruption)
+	// The issue: copying function prologue breaks stack management
+	// SSL_write starts with:
+	//   PACIBSP           - PAC authentication  
+	//   SUB SP, SP, #0x40 - allocate stack frame
+	//   STP ...           - save registers
+	// When we copy these to trampoline and jump back, stack is corrupted
+	*/
 	
 	thread_terminate(pthread);
 }
