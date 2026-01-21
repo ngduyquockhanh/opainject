@@ -496,14 +496,14 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
 
 	printf("Hook!");
-		void *original_function = NULL;
+	void *original_function = NULL;
 
-		int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
-		if (result == 0) {
-			printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
-		} else {
-			printf("[hookSSLWriteWithTinyHook] Failed to install hook. Error code: %d\n", result);
-		}
+	int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
+	if (result == 0) {
+		printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
+	} else {
+		printf("[hookSSLWriteWithTinyHook] Failed to install hook. Error code: %d\n", result);
+	}
 
 
 	// if (sslWriteAddr) {

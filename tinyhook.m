@@ -54,6 +54,7 @@ static int calc_far_jump(uint8_t *output, void *src, void *dst, bool link) {
 }
 
 static int calc_jump(uint8_t *output, void *src, void *dst, bool link) {
+    printf("Calculating jump from %p to %p\n", src, dst);
     if (need_far_jump(src, dst))
         return calc_far_jump(output, src, dst, link);
     else
@@ -65,6 +66,7 @@ static mach_vm_address_t vmbase;
 
 
 static inline void save_header(task_t task, void **src, void **dst, int min_len) {
+    printf("Saving header from %p to %p\n", *src, *dst);
     mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_DEFAULT);
     uint32_t insn;
     for (int i = 0; i < min_len; i += 4) {
@@ -116,6 +118,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
 
 
 int tiny_hook(task_t task, void *src, void *dst, void **orig) {
+    printf("Installing tiny hook from %p to %p\n", src, dst);
     int kr = 0;
     int jump_size;
     uint8_t jump_insns[MAX_JUMP_SIZE];
