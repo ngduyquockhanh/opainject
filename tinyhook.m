@@ -61,9 +61,8 @@ static int calc_jump(uint8_t *output, void *src, void *dst, bool link) {
 }
 
 static void *trampo;
-static void *remote_trampo;
 static mach_vm_address_t vmbase;
-static mach_vm_address_t remote_vmbase;
+
 
 static inline void save_header(task_t task, void **src, void **dst, int min_len) {
     mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_DEFAULT);
