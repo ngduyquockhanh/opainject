@@ -494,7 +494,22 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	if (sslWriteAddr) {
 		printf("[DEBUG] Setting breakpoint at SSL_write: 0x%llX\n", sslWriteAddr);
 		
-		// 1. Suspend all threads
+		// 1. Save old exception ports before override
+		exception_mask_t old_masks[EXC_TYPES_COUNT];
+		mach_port_t old_ports[EXC_TYPES_COUNT];
+		exception_behavior_t old_behaviors[EXC_TYPES_COUNT];
+		thread_state_flavor_t old_flavors[EXC_TYPES_COUNT];
+		mach_msg_type_number_t old_count = 0;
+		
+		kr = task_get_exception_ports(task, 
+		                              EXC_MASK_BREAKPOINT | EXC_MASK_BAD_INSTRUCTION,
+		                              old_masks, &old_count,
+		                              old_ports, old_behaviors, old_flavors);
+		if (kr == KERN_SUCCESS) {
+			printf("[DEBUG] Saved %d old exception port(s)\n", old_count);
+		}
+		
+		// 2. Suspend all threads
 		thread_act_array_t threads;
 		mach_msg_type_number_t thread_count;
 		kr = task_threads(task, &threads, &thread_count);
@@ -504,7 +519,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			}
 		}
 		
-		// 2. Save original instruction (ARM64 = 4 bytes)
+		// 3. Save original instruction (ARM64 = 4 bytes)
 		uint32_t original_insn = 0;
 		vm_size_t read_size = 4;
 		kr = vm_read_overwrite(task, sslWriteAddr, 4, 
@@ -512,13 +527,13 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		if (kr == KERN_SUCCESS) {
 			printf("[DEBUG] Original instruction: 0x%08X\n", original_insn);
 			
-			// 3. Make memory writable (code segment is normally R-X)
+			// 4. Make memory writable (code segment is normally R-X)
 			kr = vm_protect(task, sslWriteAddr, 4, FALSE, 
 			               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 			if (kr != KERN_SUCCESS) {
 				printf("[DEBUG] ERROR: Failed to make memory writable: %s\n", mach_error_string(kr));
 			} else {
-				// 4. Write BRK #0 instruction
+				// 5. Write BRK #0 instruction
 				uint32_t brk_insn = 0xD4200000;  // BRK #0 (ARM64)
 				kr = vm_write(task, sslWriteAddr, (vm_offset_t)&brk_insn, 4);
 				if (kr == KERN_SUCCESS) {
@@ -535,7 +550,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			printf("[DEBUG] ERROR: Failed to read original instruction: %s\n", mach_error_string(kr));
 		}
 		
-		// 4. Setup exception port to receive breakpoint exceptions
+		// 6. Setup exception port to receive breakpoint exceptions
 		mach_port_t exception_port = MACH_PORT_NULL;
 		kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exception_port);
 		if (kr == KERN_SUCCESS) {
@@ -554,7 +569,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			}
 		}
 		
-		// 5. Resume threads
+		// 7. Resume threads - IMPORTANT: app must continue running
 		if (thread_count > 0) {
 			for (int i = 0; i < thread_count; i++) {
 				thread_resume(threads[i]);
@@ -563,111 +578,158 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			             sizeof(thread_act_array_t) * thread_count);
 		}
 		
-		// 6. Wait for exception (breakpoint hit)
-		printf("[DEBUG] Waiting for SSL_write to be called...\n");
+		printf("[DEBUG] Waiting for SSL_write to be called (30s timeout)...\n");
+		printf("[DEBUG] App should continue running normally...\n");
 		
-		struct {
+		// 8. Wait for exception with proper message structure
+		union {
 			mach_msg_header_t head;
-			mach_msg_body_t body;
-			mach_msg_port_descriptor_t thread_port;
-			mach_msg_port_descriptor_t task_port;
-			NDR_record_t ndr;
-			exception_type_t exception;
-			mach_msg_type_number_t code_count;
-			int64_t code[2];
-			int flavor;
-			mach_msg_type_number_t state_count;
-			natural_t state[ARM_THREAD_STATE64_COUNT];
-			mach_msg_trailer_t trailer;
-		} exc_msg;
+			char data[1024];
+		} recv_msg, reply_msg;
 		
-		kr = mach_msg(&exc_msg.head, MACH_RCV_MSG | MACH_RCV_LARGE, 0,
-		             sizeof(exc_msg), exception_port,
+		kr = mach_msg(&recv_msg.head, 
+		             MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+		             0,
+		             sizeof(recv_msg),
+		             exception_port,
 		             30000,  // 30 second timeout
 		             MACH_PORT_NULL);
 		
-		if (kr == KERN_SUCCESS && exc_msg.exception == EXC_BREAKPOINT) {
-			printf("\n[DEBUG] ===== BREAKPOINT HIT: SSL_write called! =====\n");
+		if (kr == KERN_SUCCESS) {
+			printf("\n[DEBUG] ===== EXCEPTION RECEIVED! =====\n");
+			printf("[DEBUG] Message ID: %d, size: %d\n", 
+			       recv_msg.head.msgh_id, recv_msg.head.msgh_size);
 			
-			// Extract thread and get registers
-			thread_t exc_thread = exc_msg.thread_port.name;
-			arm_thread_state64_t thread_state;
-			mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
+			// Parse exception (simplified - assume it's our breakpoint)
+			// Extract thread port from message
+			mach_port_t exc_thread = recv_msg.head.msgh_remote_port;
 			
-			kr = thread_get_state(exc_thread, ARM_THREAD_STATE64,
-			                     (thread_state_t)&thread_state, &state_count);
-			if (kr == KERN_SUCCESS) {
-				// SSL_write(SSL *ssl, const void *buf, int num)
-				// X0 = SSL*, X1 = buf, X2 = num
-				uint64_t ssl_ptr = thread_state.__x[0];
-				uint64_t buf_ptr = thread_state.__x[1];
-				uint64_t buf_len = thread_state.__x[2];
+			if (exc_thread != MACH_PORT_NULL) {
+				arm_thread_state64_t thread_state;
+				mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
 				
-				printf("[DEBUG] SSL*:   0x%016llX\n", ssl_ptr);
-				printf("[DEBUG] buf*:   0x%016llX\n", buf_ptr);
-				printf("[DEBUG] length: %lld bytes\n", buf_len);
-				printf("[DEBUG] PC:     0x%016llX\n", (uint64_t)__darwin_arm_thread_state64_get_pc(thread_state));
-				printf("[DEBUG] LR:     0x%016llX\n", (uint64_t)__darwin_arm_thread_state64_get_lr(thread_state));
-				
-				// Read buffer data
-				if (buf_ptr && buf_len > 0 && buf_len < 16384) {
-					char *buffer = malloc(buf_len + 1);
-					if (buffer) {
-					vm_size_t read_size = buf_len;
-					kr = vm_read_overwrite(task, buf_ptr, buf_len,
-					                      (vm_address_t)buffer, &read_size);
-						if (kr == KERN_SUCCESS) {
-							buffer[buf_len] = '\0';
-							printf("\n[DEBUG] ===== BUFFER CONTENT =====\n");
-							printf("%.*s\n", (int)buf_len, buffer);
-							printf("[DEBUG] =============================\n\n");
-							
-							// Hex dump for binary data
-							printf("[DEBUG] Hex dump:\n");
-							for (int i = 0; i < buf_len && i < 256; i += 16) {
-								printf("  %04X: ", i);
-								for (int j = 0; j < 16 && (i+j) < buf_len; j++) {
-									printf("%02X ", (unsigned char)buffer[i+j]);
+				kr = thread_get_state(exc_thread, ARM_THREAD_STATE64,
+				                     (thread_state_t)&thread_state, &state_count);
+				if (kr == KERN_SUCCESS) {
+					// SSL_write(SSL *ssl, const void *buf, int num)
+					// X0 = SSL*, X1 = buf, X2 = num
+					uint64_t ssl_ptr = thread_state.__x[0];
+					uint64_t buf_ptr = thread_state.__x[1];
+					uint64_t buf_len = thread_state.__x[2];
+					
+					printf("[DEBUG] SSL*:   0x%016llX\n", ssl_ptr);
+					printf("[DEBUG] buf*:   0x%016llX\n", buf_ptr);
+					printf("[DEBUG] length: %lld bytes\n", buf_len);
+					printf("[DEBUG] PC:     0x%016llX\n", (uint64_t)__darwin_arm_thread_state64_get_pc(thread_state));
+					printf("[DEBUG] LR:     0x%016llX\n", (uint64_t)__darwin_arm_thread_state64_get_lr(thread_state));
+					
+					// Read buffer data
+					if (buf_ptr && buf_len > 0 && buf_len < 16384) {
+						char *buffer = malloc(buf_len + 1);
+						if (buffer) {
+							vm_size_t read_size = buf_len;
+							kr = vm_read_overwrite(task, buf_ptr, buf_len,
+							                      (vm_address_t)buffer, &read_size);
+							if (kr == KERN_SUCCESS) {
+								buffer[buf_len] = '\0';
+								printf("\n[DEBUG] ===== BUFFER CONTENT =====\n");
+								printf("%.*s\n", (int)buf_len, buffer);
+								printf("[DEBUG] =============================\n\n");
+								
+								// Hex dump for binary data
+								printf("[DEBUG] Hex dump (first 256 bytes):\n");
+								for (int i = 0; i < buf_len && i < 256; i += 16) {
+									printf("  %04X: ", i);
+									for (int j = 0; j < 16 && (i+j) < buf_len; j++) {
+										printf("%02X ", (unsigned char)buffer[i+j]);
+									}
+									printf("\n");
 								}
-								printf("\n");
 							}
+							free(buffer);
 						}
-						free(buffer);
 					}
+					
+					// Restore original instruction
+					thread_suspend(exc_thread);
+					vm_protect(task, sslWriteAddr, 4, FALSE,
+					          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+					kr = vm_write(task, sslWriteAddr, 
+					             (vm_offset_t)&original_insn, 4);
+					vm_protect(task, sslWriteAddr, 4, FALSE,
+					          VM_PROT_READ | VM_PROT_EXECUTE);
+					
+					// Rewind PC to re-execute original instruction
+					__darwin_arm_thread_state64_set_pc_fptr(thread_state, (void*)sslWriteAddr);
+					thread_set_state(exc_thread, ARM_THREAD_STATE64,
+					                (thread_state_t)&thread_state, state_count);
+					
+					thread_resume(exc_thread);
+					printf("[DEBUG] Restored instruction and rewound PC\n");
+				}
+			}
+			
+			// Send reply to kernel (CRITICAL: must reply or process hangs/crashes)
+			reply_msg.head.msgh_bits = MACH_MSGH_BITS_REMOTE(recv_msg.head.msgh_bits);
+			reply_msg.head.msgh_remote_port = recv_msg.head.msgh_remote_port;
+			reply_msg.head.msgh_local_port = MACH_PORT_NULL;
+			reply_msg.head.msgh_id = recv_msg.head.msgh_id + 100;
+			reply_msg.head.msgh_size = sizeof(mach_msg_header_t) + sizeof(kern_return_t);
+			
+			// Add return code (KERN_SUCCESS)
+			*(kern_return_t*)(&reply_msg.data[0]) = KERN_SUCCESS;
+			
+			kr = mach_msg(&reply_msg.head, 
+			             MACH_SEND_MSG,
+			             reply_msg.head.msgh_size,
+			             0,
+			             MACH_PORT_NULL,
+			             MACH_MSG_TIMEOUT_NONE,
+			             MACH_PORT_NULL);
+			
+			if (kr == KERN_SUCCESS) {
+				printf("[DEBUG] Exception handled, execution resumed\n");
+			} else {
+				printf("[DEBUG] ERROR: Failed to send reply: %s\n", mach_error_string(kr));
+			}
+			
+		} else if (kr == MACH_RCV_TIMED_OUT) {
+			printf("[DEBUG] Timeout: SSL_write not called within 30 seconds\n");
+			printf("[DEBUG] Restoring original instruction...\n");
+			
+			// Suspend threads and restore
+			kr = task_threads(task, &threads, &thread_count);
+			if (kr == KERN_SUCCESS) {
+				for (int i = 0; i < thread_count; i++) {
+					thread_suspend(threads[i]);
 				}
 				
-				// Restore original instruction
 				vm_protect(task, sslWriteAddr, 4, FALSE,
 				          VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-				kr = vm_write(task, sslWriteAddr, 
-				             (vm_offset_t)&original_insn, 4);
+				vm_write(task, sslWriteAddr, (vm_offset_t)&original_insn, 4);
 				vm_protect(task, sslWriteAddr, 4, FALSE,
 				          VM_PROT_READ | VM_PROT_EXECUTE);
 				
-				// Rewind PC to re-execute original instruction
-				__darwin_arm_thread_state64_set_pc_fptr(thread_state, (void*)sslWriteAddr);
-				thread_set_state(exc_thread, ARM_THREAD_STATE64,
-				                (thread_state_t)&thread_state, state_count);
-				
-				printf("[DEBUG] Restored instruction and rewound PC\n");
+				for (int i = 0; i < thread_count; i++) {
+					thread_resume(threads[i]);
+				}
+				vm_deallocate(mach_task_self(), (vm_offset_t)threads, 
+				             sizeof(thread_act_array_t) * thread_count);
 			}
-			
-			// Reply to exception to resume execution
-			mach_msg_header_t reply;
-			reply.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
-			reply.msgh_remote_port = exc_msg.head.msgh_remote_port;
-			reply.msgh_local_port = MACH_PORT_NULL;
-			reply.msgh_id = exc_msg.head.msgh_id + 100;
-			reply.msgh_size = sizeof(reply);
-			
-			mach_msg(&reply, MACH_SEND_MSG, sizeof(reply), 0,
-			        MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-			
-			printf("[DEBUG] Execution resumed\n");
-		} else if (kr == MACH_RCV_TIMED_OUT) {
-			printf("[DEBUG] Timeout: SSL_write not called within 30 seconds\n");
 		} else {
 			printf("[DEBUG] ERROR: mach_msg failed: %s\n", mach_error_string(kr));
+		}
+		
+		// 9. Restore old exception ports
+		for (int i = 0; i < old_count; i++) {
+			task_set_exception_ports(task, old_masks[i], old_ports[i],
+			                        old_behaviors[i], old_flavors[i]);
+		}
+		printf("[DEBUG] Restored old exception port(s)\n");
+		
+		// Cleanup
+		if (exception_port != MACH_PORT_NULL) {
+			mach_port_deallocate(mach_task_self(), exception_port);
 		}
 	}
 	
