@@ -500,7 +500,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	printf("Hook!\n");
 	void *original_function = NULL;
 
-	int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
+	int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslReadAddr, &original_function);
 	if (result == KERN_SUCCESS) {
 		printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
 	} else {
@@ -576,3 +576,4 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	
 	thread_terminate(pthread);
 }
+

@@ -55,11 +55,13 @@ static int calc_far_jump(uint8_t *output, void *src, void *dst, bool link) {
 }
 
 static int calc_jump(uint8_t *output, void *src, void *dst, bool link) {
-    printf("Calculating jump from %p to %p\n", src, dst);
+    printf("[calc_jump] Calculating jump from %p to %p\n", src, dst);
+    printf("[calc_jump] Link flag: %d\n", link);
     if (need_far_jump(src, dst))
         return calc_far_jump(output, src, dst, link);
     else
         return calc_near_jump(output, src, dst, link);
+    printf("[calc_jump] Jump calculation complete.\n");
 }
 
 static void *trampo;
@@ -67,7 +69,9 @@ static mach_vm_address_t vmbase;
 
 
 static inline void save_header(task_t task, void **src, void **dst, int min_len) {
-    printf("Saving header from %p to %p\n", *src, *dst);
+    printf("[save_header] Saving header from %p to %p\n", *src, *dst);
+    printf("[save_header] Minimum length: %d\n", min_len);
+
     mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_DEFAULT);
     uint32_t insn;
     printf("min_len: %d\n", min_len);
@@ -152,12 +156,16 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
     printf("Restoring protections for vmbase %p\n", (void *)vmbase);
     mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     printf("Header saved, new src: %p, new dst: %p\n", *src, *dst);
+    printf("[save_header] Header saved successfully.\n");
     return;
 
 }
 
 int tiny_hook(task_t task, void *src, void *dst, void **orig) {
     printf("Installing tiny hook from %p to %p\n", src, dst);
+    printf("[tiny_hook] Task: %d\n", task);
+    printf("[tiny_hook] Source address: %p\n", src);
+    printf("[tiny_hook] Destination address: %p\n", dst);
     int kr = 0;
     int jump_size;
     uint8_t jump_insns[MAX_JUMP_SIZE];
@@ -185,5 +193,8 @@ int tiny_hook(task_t task, void *src, void *dst, void **orig) {
         kr |= write_mem(task, trampo, jump_insns, jump_size);
         trampo += jump_size;
     }
+    printf("[tiny_hook] Jump instructions written successfully.\n");
+    printf("[tiny_hook] Original function pointer updated: %p\n", *orig);
+    printf("[tiny_hook] Hook process completed successfully.\n");
     return kr;
 }
