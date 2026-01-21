@@ -492,7 +492,10 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 
-	void *original_function = NULL;
+	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
+	if (sslWriteAddr) {
+		printf("Hook!")
+		void *original_function = NULL;
 
 		int result = tiny_hook_remote(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
 		if (result == 0) {
@@ -500,10 +503,6 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		} else {
 			printf("[hookSSLWriteWithTinyHook] Failed to install hook. Error code: %d\n", result);
 		}
-		
-	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
-	if (sslWriteAddr) {
-		
 		// printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
 		
 		// // Simple patch: Make SSL_write return without doing anything
