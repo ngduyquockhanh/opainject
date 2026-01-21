@@ -527,16 +527,16 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 			
 			// Keep original function intact - just testing if patching works
 			// Option 1: NOP (test only)
-			nop_patch[0] = 0xD503201F; // NOP
-			nop_patch[1] = 0xD503201F; // NOP
-			nop_patch[2] = 0xD503201F; // NOP
-			nop_patch[3] = 0xD503201F; // NOP
+			// nop_patch[0] = 0xD503201F; // NOP
+			// nop_patch[1] = 0xD503201F; // NOP
+			// nop_patch[2] = 0xD503201F; // NOP
+			// nop_patch[3] = 0xD503201F; // NOP
 			
 			// Option 2: Keep original - NO PATCH (safest)
-			// nop_patch[0] = original_bytes[0];
-			// nop_patch[1] = original_bytes[1];
-			// nop_patch[2] = original_bytes[2];
-			// nop_patch[3] = original_bytes[3];
+			nop_patch[0] = original_bytes[0];
+			nop_patch[1] = original_bytes[1];
+			nop_patch[2] = original_bytes[2];
+			nop_patch[3] = original_bytes[3];
 			
 			kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
 			if (kr == KERN_SUCCESS) {
