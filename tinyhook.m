@@ -12,6 +12,7 @@
 
 // Updated write_mem to accept a task parameter
 int write_mem(task_t task, void *destination, const void *source, size_t len) {
+    printf("Writing %zu bytes to %p in task %d\n", len, destination, task);
     int kr = 0;
     kr |= mach_vm_protect(task, (mach_vm_address_t)destination, len, FALSE,
                           VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
