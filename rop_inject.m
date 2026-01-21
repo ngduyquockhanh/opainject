@@ -574,9 +574,9 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		}
 		
 		// Save original bytes first
-		uint32_t original_bytes[16] = {0};
-		vm_size_t read_size = 64;
-		kr = vm_read_overwrite(task, sslWriteAddr, 64, 
+		uint32_t original_bytes[64] = {0};
+		vm_size_t read_size = 256;
+		kr = vm_read_overwrite(task, sslWriteAddr, 256, 
 		                      (vm_address_t)original_bytes, &read_size);
 		if (kr != KERN_SUCCESS) {
 			printf("[ERROR] Failed to read original bytes: %s\n", mach_error_string(kr));
@@ -588,7 +588,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		       original_bytes[2], original_bytes[3]);
 
 		// Analyze each instruction to determine if it can be safely patched
-		for (int i = 0; i < 16; i++) {
+		for (int i = 0; i < 64; i++) {
 			printf("[DEBUG] Instruction %d: %08X\n", i, original_bytes[i]);
 		}
 
@@ -609,7 +609,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		nop_patch[3] = original_bytes[3]; 
 		nop_patch[4] = original_bytes[4]; 
 		nop_patch[5] = original_bytes[5]; 
-		nop_patch[6] = 0xAA1303F3; 
+		nop_patch[6] = original_bytes[6]; 
 		nop_patch[7] = original_bytes[7]; 
 		nop_patch[8] = original_bytes[8]; 
 		nop_patch[9] = original_bytes[9]; 
