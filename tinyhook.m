@@ -44,6 +44,8 @@ static int calc_near_jump(uint8_t *output, void *src, void *dst, bool link) {
 }
 
 static int calc_far_jump(uint8_t *output, void *src, void *dst, bool link) {
+    printf("[calc_far_jump] Calculating far jump from %p to %p\n", src, dst);
+
     // adrp    x17, imm
     // add     x17, x17, imm    ; x17 -> dst
     // br/blr  x17
@@ -53,6 +55,7 @@ static int calc_far_jump(uint8_t *output, void *src, void *dst, bool link) {
     insn = ((int64_t)dst & 0xfff) << 10 | AARCH64_ADD;
     *(uint32_t *)(output + 4) = insn;
     *(uint32_t *)(output + 8) = link ? AARCH64_BLR : AARCH64_BR;
+    printf("[calc_far_jump] Far jump calculation complete.\n");
     return 12; // Return the jump size directly
 }
 
