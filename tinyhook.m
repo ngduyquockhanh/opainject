@@ -69,9 +69,11 @@ static mach_vm_address_t vmbase;
 static inline void save_header(task_t task, void **src, void **dst, int min_len) {
     printf("Saving header from %p to %p\n", *src, *dst);
     mach_vm_protect(task, vmbase, PAGE_SIZE, FALSE, VM_PROT_DEFAULT);
-    uint32_t insn;
+     uint32_t insn;
     for (int i = 0; i < min_len; i += 4) {
-        insn = *(uint32_t *)*src;
+        // Đọc lệnh từ bộ nhớ từ xa
+        mach_vm_read_overwrite(remote_task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
+
         if (((insn ^ 0x90000000) & 0x9f000000) == 0) {
             // adrp
             int32_t imm21 = sign_extend((insn >> 29 & 0x3) | (insn >> 3 & 0x1ffffc), 21);
@@ -81,10 +83,9 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
                 // modify the immediate (len: 4 -> 4)
                 insn &= 0x9f00001f; // clean the immediate
                 insn = ((len & 0x3) << 29) | ((len & 0x1ffffc) << 3) | insn;
-                *(uint32_t *)*dst = insn;
+                mach_vm_write(remote_task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
                 *dst += 4;
-            }
-            else {
+            } else {
                 // use movz + movk to get the address (len: 4 -> 16)
                 int64_t imm64 = addr << 12;
                 uint16_t rd = insn & 0b11111;
@@ -92,22 +93,22 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
                 for (int j = 0; imm64; imm64 >>= 16, j++) {
                     uint64_t cur_imm = imm64 & 0xffff;
                     if (cur_imm) {
-                        *(uint32_t *)*dst = (j << 21) | (cur_imm << 5) | rd | (cleaned ? AARCH64_MOVK : AARCH64_MOVZ);
+                        insn = (j << 21) | (cur_imm << 5) | rd | (cleaned ? AARCH64_MOVK : AARCH64_MOVZ);
+                        mach_vm_write(remote_task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
                         *dst += 4;
                         cleaned = true;
                     }
                 }
             }
-        }
-        else if (((insn ^ 0x14000000) & 0xfc000000) == 0 || ((insn ^ 0x94000000) & 0xfc000000) == 0) {
+        } else if (((insn ^ 0x14000000) & 0xfc000000) == 0 || ((insn ^ 0x94000000) & 0xfc000000) == 0) {
             // b or bl
             bool link = insn >> 31;
             int32_t imm26 = sign_extend(insn, 26);
             void *addr = *src + (imm26 << 2);
-            *dst += calc_jump(*dst, *dst, addr, link);
-        }
-        else {
-            *(uint32_t *)*dst = insn;
+            int jump_len = calc_jump((uint8_t *)*dst, *dst, addr, link);
+            *dst += jump_len;
+        } else {
+            mach_vm_write(remote_task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
             *dst += 4;
         }
         *src += 4;

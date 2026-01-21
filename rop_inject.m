@@ -493,6 +493,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	uint64_t sslReadAddr = remoteDlSym(task, libBorringSSL, "_SSL_read");
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
+	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_read at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslReadAddr);
 
 	// === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
 
