@@ -564,60 +564,76 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		thread_act_array_t threads;
 		mach_msg_type_number_t thread_count;
 		kr = task_threads(task, &threads, &thread_count);
-		if (kr == KERN_SUCCESS) {
-			for (int i = 0; i < thread_count; i++) {
-				thread_suspend(threads[i]);
-			}
+		if (kr != KERN_SUCCESS) {
+			printf("[ERROR] Failed to get task threads: %s\n", mach_error_string(kr));
+			return;
+		}
+		
+		for (int i = 0; i < thread_count; i++) {
+			thread_suspend(threads[i]);
 		}
 		
 		// Save original bytes first
-		uint32_t original_bytes[4] = {0};
-		vm_size_t read_size = 16;
-		kr = vm_read_overwrite(task, sslWriteAddr, 16, 
+		uint32_t original_bytes[16] = {0};
+		vm_size_t read_size = 64;
+		kr = vm_read_overwrite(task, sslWriteAddr, 64, 
 		                      (vm_address_t)original_bytes, &read_size);
-		if (kr == KERN_SUCCESS) {
-			printf("[DEBUG] Original: %08X %08X %08X %08X\n", 
-			       original_bytes[0], original_bytes[1], 
-			       original_bytes[2], original_bytes[3]);
+		if (kr != KERN_SUCCESS) {
+			printf("[ERROR] Failed to read original bytes: %s\n", mach_error_string(kr));
+			return;
 		}
-		
+
+		printf("[DEBUG] Original Instructions: %08X %08X %08X %08X \n", 
+		       original_bytes[0], original_bytes[1], 
+		       original_bytes[2], original_bytes[3]);
+
+		// Analyze each instruction to determine if it can be safely patched
+		for (int i = 0; i < 16; i++) {
+			printf("[DEBUG] Instruction %d: %08X\n", i, original_bytes[i]);
+		}
+
 		// Make writable
-		kr = vm_protect(task, sslWriteAddr, 16, FALSE,
-		               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-		if (kr == KERN_SUCCESS) {
-			// Patch to: add NOP instructions without breaking the function
-			uint32_t nop_patch[4];
-
-			// Insert NOPs at specific positions (example: replace some instructions with NOPs)
-			nop_patch[0] = original_bytes[0]; // NOP instruction
-			nop_patch[1] = original_bytes[1];
-			nop_patch[2] = original_bytes[2]; // NOP instruction
-			nop_patch[3] = 0xD503201F;
-
-			kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
-			if (kr == KERN_SUCCESS) {
-				printf("[DEBUG] SSL_write patched with NOPs (function preserved)\n");
-			} else {
-				printf("[DEBUG] ERROR: Failed to write: %s\n", mach_error_string(kr));
-			}
-
-			// Restore executable
-			vm_protect(task, sslWriteAddr, 16, FALSE,
-			          VM_PROT_READ | VM_PROT_EXECUTE);
+		kr = vm_protect(task, sslWriteAddr, 16, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+		if (kr != KERN_SUCCESS) {
+			printf("[ERROR] Failed to set memory writable: %s\n", mach_error_string(kr));
+			return;
 		}
-		
+
+		// Patch to: add NOP instructions without breaking the function
+		uint32_t nop_patch[4];
+
+		// Only replace instructions that are safe to modify
+		nop_patch[0] = original_bytes[0]; // Keep original instruction
+		nop_patch[1] = original_bytes[1];        // NOP instruction
+		nop_patch[2] = original_bytes[2]; // Keep original instruction
+		nop_patch[3] = original_bytes[3];        // NOP instruction
+
+		kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 16);
+		if (kr != KERN_SUCCESS) {
+			printf("[ERROR] Failed to write NOP patch: %s\n", mach_error_string(kr));
+
+			// Restore original bytes if patch fails
+			vm_write(task, sslWriteAddr, (vm_offset_t)original_bytes, 16);
+			return;
+		}
+
+		// Restore executable
+		kr = vm_protect(task, sslWriteAddr, 16, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+		if (kr != KERN_SUCCESS) {
+			printf("[ERROR] Failed to restore memory protection: %s\n", mach_error_string(kr));
+			return;
+		}
+
 		// Resume threads
-		if (thread_count > 0) {
-			for (int i = 0; i < thread_count; i++) {
-				thread_resume(threads[i]);
-			}
-			vm_deallocate(mach_task_self(), (vm_offset_t)threads,
-			             sizeof(thread_act_array_t) * thread_count);
+		for (int i = 0; i < thread_count; i++) {
+			thread_resume(threads[i]);
 		}
-		
-		printf("[DEBUG] Test complete - app should run normally with NOPs\n");
-	}
+		vm_deallocate(mach_task_self(), (vm_offset_t)threads, sizeof(thread_act_array_t) * thread_count);
 
+		printf("[DEBUG] Test complete - app should run normally with NOPs\n");
+	} else {
+		printf("[ERROR] sslWriteAddr is NULL or invalid.\n");
+	}
 	
 	thread_terminate(pthread);
 }
