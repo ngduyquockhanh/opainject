@@ -72,7 +72,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
      uint32_t insn;
     for (int i = 0; i < min_len; i += 4) {
         // Đọc lệnh từ bộ nhớ từ xa
-        mach_vm_read_overwrite(remote_task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
+        mach_vm_read_overwrite(task, (mach_vm_address_t)*src, sizeof(uint32_t), (vm_address_t)&insn, NULL);
 
         if (((insn ^ 0x90000000) & 0x9f000000) == 0) {
             // adrp
@@ -83,7 +83,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
                 // modify the immediate (len: 4 -> 4)
                 insn &= 0x9f00001f; // clean the immediate
                 insn = ((len & 0x3) << 29) | ((len & 0x1ffffc) << 3) | insn;
-                mach_vm_write(remote_task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
+                mach_vm_write(task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
                 *dst += 4;
             } else {
                 // use movz + movk to get the address (len: 4 -> 16)
@@ -94,7 +94,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
                     uint64_t cur_imm = imm64 & 0xffff;
                     if (cur_imm) {
                         insn = (j << 21) | (cur_imm << 5) | rd | (cleaned ? AARCH64_MOVK : AARCH64_MOVZ);
-                        mach_vm_write(remote_task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
+                        mach_vm_write(task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
                         *dst += 4;
                         cleaned = true;
                     }
@@ -108,7 +108,7 @@ static inline void save_header(task_t task, void **src, void **dst, int min_len)
             int jump_len = calc_jump((uint8_t *)*dst, *dst, addr, link);
             *dst += jump_len;
         } else {
-            mach_vm_write(remote_task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
+            mach_vm_write(task, (mach_vm_address_t)*dst, (vm_offset_t)&insn, sizeof(uint32_t));
             *dst += 4;
         }
         *src += 4;
