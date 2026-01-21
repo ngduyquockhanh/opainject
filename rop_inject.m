@@ -87,6 +87,7 @@
 #import "thread_utils.h"
 #import "arm64.h"
 #include <mach/vm_map.h>
+#include "tinyhook.h"
 
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
@@ -497,7 +498,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		printf("Hook!");
 		void *original_function = NULL;
 
-		int result = tiny_hook_remote(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
+		int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslWriteAddr, &original_function);
 		if (result == 0) {
 			printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
 		} else {
