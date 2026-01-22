@@ -170,7 +170,7 @@ bool start_ssl_interception(task_t task, uint64_t ssl_write_addr) {
     // - X0, X1, X2 have been saved to X21, X20, X19
     // - Stack frame is set up
     // - We can safely read arguments
-    uint64_t breakpoint_addr = ssl_write_addr
+    uint64_t breakpoint_addr = ssl_write_addr;
     
     // Add debug logs to verify breakpoint setup
     printf("[DEBUG] Setting breakpoint at address: 0x%llx\n", breakpoint_addr);
