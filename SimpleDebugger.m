@@ -13,13 +13,14 @@
 #import <mach-o/dyld_images.h>
 #import <stdlib.h>
 #import <string.h>
+#import <libkern/OSCacheControl.h>
 
 #include "mach_messages.h"
 #include "emg_vm_protect.h"
 #include <mach/exception.h>
 #include <mach/arm/thread_state.h>
 
-#define ARM64_BREAK_INSTRUCTION 0xD4200000
+#define ARM64_BREAK_INSTRUCTION 0xD4200000u
 #define MAX_BREAKPOINTS 256
 #define GET_PC(state) ((uint64_t)arm_thread_state64_get_pc(state))
 
@@ -446,6 +447,17 @@ static uint32_t setInstructionInternal(SimpleDebugger* debugger,
                (unsigned long long)address);
     }
     
+    // Synchronize instruction cache after modifying code
+    if (debugger->isRemote) {
+        // For remote process, we can't directly call sys_icache_invalidate
+        // The cache will be invalidated when we change memory protection
+        os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Cache sync needed for remote process at 0x%llx", 
+               (unsigned long long)address);
+    } else {
+        // For local process, invalidate instruction cache
+        sys_icache_invalidate((void*)address, sizeof(uint32_t));
+    }
+    
     protectPageRemote(debugger, address, 1, VM_PROT_READ | VM_PROT_EXECUTE);
     
     resumeAllThreads(debugger, threads, thread_count);
@@ -523,30 +535,40 @@ static void* exceptionServer(SimpleDebugger* debugger) {
             continue;
         }
         
+        vm_address_t pc = GET_PC(state);
         os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Exception received: type %d at PC 0x%llx", 
-               exceptionMessage.exception, (unsigned long long)GET_PC(state));    
+               exceptionMessage.exception, (unsigned long long)pc);    
 
         if (exceptionMessage.exception == EXC_BREAKPOINT) {
+            os_log(OS_LOG_DEFAULT, "[SimpleDebugger] EXC_BREAKPOINT detected!");
             pthread_mutex_lock(&debugger->instructionMutex);
             
-            vm_address_t pc = GET_PC(state);
             BreakpointEntry* bp = findBreakpoint(debugger, pc);
             
-            if (debugger->exceptionCallback && bp) {
-                bool removeBreak = false;
-                debugger->exceptionCallback(debugger->exceptionContext, 
-                                          thread, state, &removeBreak);
-                continueFromBreak(debugger, thread, removeBreak, 
-                                exceptionMessage, state, state_count);
+            if (bp) {
+                os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Breakpoint found at 0x%llx", (unsigned long long)pc);
+                if (debugger->exceptionCallback) {
+                    os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Calling exception callback");
+                    bool removeBreak = false;
+                    debugger->exceptionCallback(debugger->exceptionContext, 
+                                              thread, state, &removeBreak);
+                    continueFromBreak(debugger, thread, removeBreak, 
+                                    exceptionMessage, state, state_count);
+                } else {
+                    os_log(OS_LOG_DEFAULT, "[SimpleDebugger] No exception callback set");
+                    continueFromBreak(debugger, thread, false, 
+                                    exceptionMessage, state, state_count);
+                }
             } else {
+                os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Breakpoint NOT found at PC 0x%llx", (unsigned long long)pc);
                 continueFromBreak(debugger, thread, false, 
                                 exceptionMessage, state, state_count);
             }
             
             pthread_mutex_unlock(&debugger->instructionMutex);
         } else {
-            // os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Non-breakpoint exception (type: %d)", 
-            //        exceptionMessage.exception);
+            os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Non-breakpoint exception (type: %d) at PC 0x%llx", 
+                   exceptionMessage.exception, (unsigned long long)pc);
             if (debugger->badAccessCallback) {
                 debugger->badAccessCallback(debugger->badAccessContext, thread, state);
             }
