@@ -19,6 +19,7 @@
 #include "emg_vm_protect.h"
 #include <mach/exception.h>
 #include <mach/arm/thread_state.h>
+#include <mach/vm_machine_attribute.h>
 #define PAGE_SIZE1 16384
 
 // ARM64 BRK #0 instruction
@@ -488,7 +489,7 @@ static uint32_t setInstructionInternal(SimpleDebugger* debugger,
                   FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 
         vm_machine_attribute(
-            task,
+            debugger->targetTask,
             page_addr,
             PAGE_SIZE,
             MATTR_CACHE,
