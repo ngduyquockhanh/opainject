@@ -65,10 +65,11 @@ static void dump_ssl_buffer(const uint8_t* buffer, size_t size) {
 }
 
 // Exception callback - called when breakpoint is hit
+// Update ssl_exception_callback to match ExceptionCallback parameter order
 static void ssl_exception_callback(
+    void* context,
     mach_port_t thread,
     arm_thread_state64_t state,
-    void* context,
     bool* removeBreak
 ) {
     uint64_t pc = arm_thread_state64_get_pc(state);
