@@ -12,6 +12,9 @@
 #include <string.h>
 #include <mach/mach.h>
 
+// Define ContinueCallback as a function pointer type
+typedef void (*ContinueCallback)(bool shouldRemoveBreakpoint);
+
 static SimpleDebugger* g_debugger = NULL;
 static task_t g_target_task = MACH_PORT_NULL;
 static uint64_t g_ssl_write_addr = 0;
