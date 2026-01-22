@@ -21,6 +21,8 @@ extern "C++" {
 #import <pthread.h>
 #import <mutex>
 #import <unordered_map>
+#import <vector>     // ← Thêm dòng này cho std::vector
+#import <string>     // ← Thêm dòng này cho std::string
 
 
 struct MachExceptionMessage;
@@ -31,12 +33,16 @@ public:
   
   using BadAccessCallback = std::function<void(mach_port_t thread, arm_thread_state64_t state)>;
 
+  // Constructors
   SimpleDebugger();
-  SimpleDebugger(mach_port_t remoteTask)
+  SimpleDebugger(mach_port_t remoteTask);  // ← Thêm dấu ; ở đây
 
+  // Setters/Getters
   void setTargetTask(mach_port_t task);
   mach_port_t getTargetTask() const;
+  bool isRemoteDebugging() const;  // ← Thêm declaration này
 
+  // Core debugging functions
   bool startDebugging();
   void setExceptionCallback(ExceptionCallback callback);
   void setBadAccessCallback(BadAccessCallback callback);
@@ -45,14 +51,12 @@ public:
   // The function at originalFunc must be at least 5 instructions
   int hookFunction(void *originalFunc, void *newFunc);
 
+  // Memory operations
   bool readMemory(vm_address_t address, void* buffer, vm_size_t size);
-  
-  // Ghi memory vào target process
   bool writeMemory(vm_address_t address, const void* buffer, vm_size_t size);
   
-  // Tìm symbol trong remote process
+  // Symbol and image operations
   vm_address_t findSymbol(const char* symbolName, const char* imageName = nullptr);
-  
   std::vector<std::string> getLoadedImages();
 
   ~SimpleDebugger();
@@ -74,14 +78,14 @@ private:
   
   // Helper methods cho remote operations
   uint32_t readInstruction(vm_address_t address);
-  bool setInstructionRemote(vm_address_t address, uint32_t newInst, uint32_t* oldInst);
+  uint32_t setInstructionInternal(vm_address_t address, uint32_t newInst);  // ← Sửa tên và signature
   void protectPageRemote(vm_address_t address, vm_size_t size, vm_prot_t newProtection);
   
   // Suspend/resume all threads trong target process
   bool suspendAllThreads(thread_act_array_t* threads, mach_msg_type_number_t* thread_count);
   void resumeAllThreads(thread_act_array_t threads, mach_msg_type_number_t thread_count);
-
 };
+
 }
 #endif
 
