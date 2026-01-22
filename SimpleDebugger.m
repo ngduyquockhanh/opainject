@@ -486,6 +486,15 @@ static uint32_t setInstructionInternal(SimpleDebugger* debugger,
                   FALSE, VM_PROT_NONE);
         vm_protect(debugger->targetTask, page_addr, PAGE_SIZE1, 
                   FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+
+        vm_machine_attribute(
+            task,
+            page_addr,
+            PAGE_SIZE,
+            MATTR_CACHE,
+            VM_CACHE_FLUSH
+        );
+         
         
         os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Cache flushed for remote process at 0x%llx", 
                (unsigned long long)address);
