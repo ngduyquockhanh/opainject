@@ -37,7 +37,7 @@
 #import "thread_utils.h"
 #import "arm64.h"
 #include <mach/vm_map.h>
-#include "SimpleDebugger.h"
+#include "ssl_intercept.h"
 
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
@@ -445,39 +445,6 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_read at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslReadAddr);
 
-	SimpleDebugger debugger(task);
-
-	if (!debugger.startDebugging()) {
-        printf("Failed to start debugging\n");
-        return 1;
-    }
-    
-    printf("Debugger started successfully\n");
-
-	debugger.setExceptionCallback([](mach_port_t thread, 
-                                     arm_thread_state64_t state,
-                                     auto continue_fn) {
-        printf("\n=== BREAKPOINT HIT ===\n");
-        printf("PC: 0x%llx\n", GET_PC(state));
-        printf("SP: 0x%llx\n", state.__sp);
-        printf("LR: 0x%llx\n", state.__lr);
-        
-        // Print registers
-        printf("\nRegisters:\n");
-        for (int i = 0; i < 29; i++) {
-            printf("X%-2d: 0x%016llx%s", i, state.__x[i], 
-                   (i % 2 == 1) ? "\n" : "  ");
-        }
-        printf("\n");
-        
-        // Continue execution (keep breakpoint)
-        continue_fn(false);
-    });
-
-	debugger.setBreakpoint(sslWriteAddr);
-	
-
-
 	// if (sslWriteAddr) {
 		
 	// 	printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
@@ -574,6 +541,38 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	// } else {
 	// 	printf("[ERROR] sslWriteAddr is NULL or invalid.\n");
 	// }
+	
+	// ============================================================================
+	// SSL_write Interception using SimpleDebugger (Hardware Breakpoint)
+	// ============================================================================
+	
+	if (sslWriteAddr) {
+		printf("\n╔═══════════════════════════════════════════════════════════════════════╗\n");
+		printf("║  Starting SSL_write interception with SimpleDebugger                  ║\n");
+		printf("║  • No code modification (hardware breakpoint only)                    ║\n");
+		printf("║  • Intercepts all SSL_write calls                                     ║\n");
+		printf("║  • Dumps plaintext data before encryption                             ║\n");
+		printf("╚═══════════════════════════════════════════════════════════════════════╝\n");
+		
+		if (start_ssl_interception(task, sslWriteAddr)) {
+			printf("\n✅ SSL interception started successfully!\n");
+			printf("💡 The target app will continue running normally.\n");
+			printf("📝 All SSL_write calls will be logged below.\n");
+			printf("⏹  Press Ctrl+C to stop monitoring and exit.\n\n");
+			
+			// Keep monitoring indefinitely (or until interrupted)
+			// In production, integrate with your main event loop
+			while (1) {
+				sleep(1);
+			}
+			
+			stop_ssl_interception();
+		} else {
+			printf("\n❌ Failed to start SSL interception\n");
+		}
+	} else {
+		printf("\n❌ SSL_write address not found\n");
+	}
 	
 	thread_terminate(pthread);
 }

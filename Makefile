@@ -5,7 +5,7 @@ include $(THEOS)/makefiles/common.mk
 
 TOOL_NAME = opainject
 
-opainject_FILES = emg_vm_protect.c SimpleDebugger.cpp main.m dyld.m shellcode_inject.m rop_inject.m thread_utils.m task_utils.m arm64.m tinyhook.m hw_breakpoint_ssl.m 
+opainject_FILES = emg_vm_protect.c SimpleDebugger.m ssl_intercept.m main.m dyld.m shellcode_inject.m rop_inject.m thread_utils.m task_utils.m arm64.m tinyhook.m hw_breakpoint_ssl.m 
 opainject_CFLAGS = -fobjc-arc -DTHEOS_LEAN_AND_MEAN
 opainject_CODESIGN_FLAGS = -Sentitlements.plist
 opainject_INSTALL_PATH = /usr/local/bin

@@ -5,6 +5,13 @@
 //  Created by Noah Martin on 10/9/24.
 //
 
+#ifndef SimpleDebugger_h
+#define SimpleDebugger_h
+
+#include <mach/mach.h>
+#include <mach/arm/thread_state.h>
+#include <stdbool.h>
+
 #if TARGET_OS_TV || TARGET_OS_WATCH || !(defined(__arm64__) || defined(__aarch64__))
   #define EMG_ENABLE_MACH_APIS 0
 #else
@@ -14,79 +21,61 @@
 #if EMG_ENABLE_MACH_APIS
 
 #ifdef __cplusplus
-extern "C++" {
+extern "C" {
+#endif
 
-#import <functional>
-#import <mach/mach.h>
-#import <pthread.h>
-#import <mutex>
-#import <unordered_map>
-#import <vector>     // ← Thêm dòng này cho std::vector
-#import <string>     // ← Thêm dòng này cho std::string
+// Opaque pointer
+typedef struct SimpleDebugger SimpleDebugger;
 
+// Callback types
+typedef void (*ExceptionCallback)(void* context, 
+                                  mach_port_t thread, 
+                                  arm_thread_state64_t state,
+                                  bool* removeBreak);
 
-struct MachExceptionMessage;
+typedef void (*BadAccessCallback)(void* context,
+                                  mach_port_t thread, 
+                                  arm_thread_state64_t state);
 
-class SimpleDebugger {
-public:
-  using ExceptionCallback = std::function<void(mach_port_t thread, arm_thread_state64_t state, std::function<void(bool removeBreak)>)>;
-  
-  using BadAccessCallback = std::function<void(mach_port_t thread, arm_thread_state64_t state)>;
+// Constructor/Destructor
+SimpleDebugger* SimpleDebugger_create(void);
+SimpleDebugger* SimpleDebugger_createWithTask(mach_port_t remoteTask);
+void SimpleDebugger_destroy(SimpleDebugger* debugger);
 
-  // Constructors
-  SimpleDebugger();
-  SimpleDebugger(mach_port_t remoteTask);  // ← Thêm dấu ; ở đây
+// Setters/Getters
+void SimpleDebugger_setTargetTask(SimpleDebugger* debugger, mach_port_t task);
+mach_port_t SimpleDebugger_getTargetTask(SimpleDebugger* debugger);
+bool SimpleDebugger_isRemoteDebugging(SimpleDebugger* debugger);
 
-  // Setters/Getters
-  void setTargetTask(mach_port_t task);
-  mach_port_t getTargetTask() const;
-  bool isRemoteDebugging() const;  // ← Thêm declaration này
+// Core debugging functions
+bool SimpleDebugger_startDebugging(SimpleDebugger* debugger);
+void SimpleDebugger_setExceptionCallback(SimpleDebugger* debugger, 
+                                         ExceptionCallback callback,
+                                         void* context);
+void SimpleDebugger_setBadAccessCallback(SimpleDebugger* debugger,
+                                         BadAccessCallback callback,
+                                         void* context);
+void SimpleDebugger_setBreakpoint(SimpleDebugger* debugger, vm_address_t address);
+void SimpleDebugger_removeBreakpoint(SimpleDebugger* debugger, vm_address_t address);
 
-  // Core debugging functions
-  bool startDebugging();
-  void setExceptionCallback(ExceptionCallback callback);
-  void setBadAccessCallback(BadAccessCallback callback);
-  void setBreakpoint(vm_address_t address);
+// Memory operations
+bool SimpleDebugger_readMemory(SimpleDebugger* debugger,
+                               vm_address_t address, 
+                               void* buffer, 
+                               vm_size_t size);
+bool SimpleDebugger_writeMemory(SimpleDebugger* debugger,
+                                vm_address_t address, 
+                                const void* buffer, 
+                                vm_size_t size);
 
-  // The function at originalFunc must be at least 5 instructions
-  int hookFunction(void *originalFunc, void *newFunc);
+// Function hooking
+int SimpleDebugger_hookFunction(SimpleDebugger* debugger,
+                                void* originalFunc, 
+                                void* newFunc);
 
-  // Memory operations
-  bool readMemory(vm_address_t address, void* buffer, vm_size_t size);
-  bool writeMemory(vm_address_t address, const void* buffer, vm_size_t size);
-  
-  // Symbol and image operations
-  vm_address_t findSymbol(const char* symbolName, const char* imageName = nullptr);
-  std::vector<std::string> getLoadedImages();
-
-  ~SimpleDebugger();
-
-private:
-  mach_port_t targetTask; 
-  bool isRemote;  
-  mach_port_t exceptionPort;
-  pthread_t serverThread;
-  std::mutex m;
-  std::mutex instructionMutex;
-  ExceptionCallback exceptionCallback;
-  BadAccessCallback badAccessCallback;
-  std::unordered_map<vm_address_t, uint32_t> originalInstruction;
-
-  static void* exceptionServerWrapper(void* arg);
-  void* exceptionServer();
-  void continueFromBreak(mach_port_t thread, bool removeBreak, MachExceptionMessage exceptionMessage, arm_thread_state64_t state, mach_msg_type_number_t state_count);
-  
-  // Helper methods cho remote operations
-  uint32_t readInstruction(vm_address_t address);
-  uint32_t setInstructionInternal(vm_address_t address, uint32_t newInst);  // ← Sửa tên và signature
-  void protectPageRemote(vm_address_t address, vm_size_t size, vm_prot_t newProtection);
-  
-  // Suspend/resume all threads trong target process
-  bool suspendAllThreads(thread_act_array_t* threads, mach_msg_type_number_t* thread_count);
-  void resumeAllThreads(thread_act_array_t threads, mach_msg_type_number_t thread_count);
-};
-
+#ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif // EMG_ENABLE_MACH_APIS
+#endif // SimpleDebugger_h
