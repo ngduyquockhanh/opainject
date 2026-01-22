@@ -569,10 +569,23 @@ static void* exceptionServer(SimpleDebugger* debugger) {
         }
         
         vm_address_t pc = GET_PC(state);
+        uint32_t instAtPC = 0;
+        if (SimpleDebugger_readMemory(debugger, pc, &instAtPC, sizeof(uint32_t))) {
+            os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Instruction at PC 0x%llx: 0x%x", 
+                (unsigned long long)pc, instAtPC);
+        }
+
+        // DEBUG: Check breakpoint address
+        if (debugger->breakpointCount > 0) {
+            os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Breakpoint set at: 0x%llx", 
+                (unsigned long long)debugger->breakpoints[0].address);
+        }
+
         os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Exception received: type %d at PC 0x%llx code[0]=0x%llx",
             exceptionMessage.exception,
             (unsigned long long)pc,
             (unsigned long long)exceptionMessage.code[0]);
+        
 
         if (exceptionMessage.exception == EXC_BREAKPOINT) {
             os_log(OS_LOG_DEFAULT, "[SimpleDebugger] EXC_BREAKPOINT detected!");
