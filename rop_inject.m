@@ -88,6 +88,7 @@
 #import "arm64.h"
 #include <mach/vm_map.h>
 #include "tinyhook.h"
+#include "hw_breakpoint_ssl.h"
 
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
@@ -495,161 +496,110 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_read at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslReadAddr);
 
-	// // === SIMPLE APPROACH: Make SSL_write return immediately (SSL Kill Switch) ===
-
-	// printf("Hook!\n");
-	// // void *original_function = NULL;
-
-	// // int result = tiny_hook(task, (void*)sslWriteAddr, (void*)sslReadAddr, &original_function);
-	// // if (result == KERN_SUCCESS) {
-	// // 	printf("[hookSSLWriteWithTinyHook] Hook installed successfully!\n");
-	// // } else {
-	// // 	printf("[hookSSLWriteWithTinyHook] Failed to install hook. Error code: %d\n", result);
-	// // }
-
-
-	// // Replace sslReadAddr with shellcode to intercept SSL_write buffer
-    // printf("[injectDylibViaRop] Creating shellcode to intercept SSL_write buffer.\n");
-
-    // // Define shellcode to read SSL_write buffer and call the original function
-    // uint8_t shellcode[] = {
-    //     0xD1, 0x20, 0x00, 0x58, // LDR X17, [X0] (example instruction to read buffer)
-    //     0xD6, 0x1F, 0x03, 0xD5, // BR X17 (branch to original function)
-    // };
-
-    // // Allocate memory for shellcode in the target process
-    // vm_address_t shellcodeAddr = 0;
-    // kr = vm_allocate(task, &shellcodeAddr, sizeof(shellcode), VM_FLAGS_ANYWHERE);
-    // if (kr != KERN_SUCCESS) {
-    //     printf("[injectDylibViaRop] Failed to allocate memory for shellcode: %s\n", mach_error_string(kr));
-    //     return;
-    // }
-
-    // // Write shellcode to allocated memory
-    // kr = vm_write(task, shellcodeAddr, (vm_offset_t)shellcode, sizeof(shellcode));
-    // if (kr != KERN_SUCCESS) {
-    //     printf("[injectDylibViaRop] Failed to write shellcode to memory: %s\n", mach_error_string(kr));
-    //     vm_deallocate(task, shellcodeAddr, sizeof(shellcode));
-    //     return;
-    // }
-
-    // // Make shellcode executable
-    // kr = vm_protect(task, shellcodeAddr, sizeof(shellcode), FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    // if (kr != KERN_SUCCESS) {
-    //     printf("[injectDylibViaRop] Failed to make shellcode executable: %s\n", mach_error_string(kr));
-    //     vm_deallocate(task, shellcodeAddr, sizeof(shellcode));
-    //     return;
-    // }
-
-    // printf("[injectDylibViaRop] Shellcode created at address: 0x%llX\n", (unsigned long long)shellcodeAddr);
-
-    // // Hook SSL_write with the shellcode
-    // void *original_function = NULL;
-    // int result = tiny_hook(task, (void*)sslWriteAddr, (void*)shellcodeAddr, &original_function);
-    // if (result == KERN_SUCCESS) {
-    //     printf("[injectDylibViaRop] Hook installed successfully with shellcode!\n");
-    // } else {
-    //     printf("[injectDylibViaRop] Failed to install hook with shellcode. Error code: %d\n", result);
-    //     vm_deallocate(task, shellcodeAddr, sizeof(shellcode));
-    // }
-
-
-	if (sslWriteAddr) {
-		
-		printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
-		
-		// Simple patch: Make SSL_write return without doing anything
-		// This is safer than trampoline approach for testing
-		
-		thread_act_array_t threads;
-		mach_msg_type_number_t thread_count;
-		kr = task_threads(task, &threads, &thread_count);
-		if (kr != KERN_SUCCESS) {
-			printf("[ERROR] Failed to get task threads: %s\n", mach_error_string(kr));
-			return;
-		}
-		
-		for (int i = 0; i < thread_count; i++) {
-			thread_suspend(threads[i]);
-		}
-		
-		// Save original bytes first
-		uint32_t original_bytes[64] = {0};
-		vm_size_t read_size = 256;
-		kr = vm_read_overwrite(task, sslWriteAddr, 256, 
-		                      (vm_address_t)original_bytes, &read_size);
-		if (kr != KERN_SUCCESS) {
-			printf("[ERROR] Failed to read original bytes: %s\n", mach_error_string(kr));
-			return;
-		}
-
-		printf("[DEBUG] Original Instructions: %08X %08X %08X %08X \n", 
-		       original_bytes[0], original_bytes[1], 
-		       original_bytes[2], original_bytes[3]);
-
-		// Analyze each instruction to determine if it can be safely patched
-		for (int i = 0; i < 64; i++) {
-			printf("[DEBUG] Instruction %d: %08X\n", i, original_bytes[i]);
-		}
-
-		// Make writable
-		kr = vm_protect(task, sslWriteAddr, 80, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-		if (kr != KERN_SUCCESS) {
-			printf("[ERROR] Failed to set memory writable: %s\n", mach_error_string(kr));
-			return;
-		}
-
-		// Patch to: add NOP instructions without breaking the function
-		uint32_t nop_patch[20];
-
-		// Only replace instructions that are safe to modify
-		nop_patch[0] = original_bytes[0]; 
-		nop_patch[1] = original_bytes[1];      
-		nop_patch[2] = original_bytes[2]; 
-		nop_patch[3] = original_bytes[3]; 
-		nop_patch[4] = original_bytes[4]; 
-		nop_patch[5] = original_bytes[5]; 
-		nop_patch[6] = original_bytes[6]; 
-		nop_patch[7] = original_bytes[7]; 
-		nop_patch[8] = original_bytes[8]; 
-		nop_patch[9] = original_bytes[9]; 
-		nop_patch[10] = original_bytes[10]; 
-		nop_patch[11] = original_bytes[11]; 
-		nop_patch[12] = original_bytes[12]; 
-		nop_patch[13] = original_bytes[13]; 
-		nop_patch[14] = original_bytes[14]; 
-		nop_patch[15] = original_bytes[15]; 
-		nop_patch[16] = original_bytes[16]; 
-		nop_patch[17] = original_bytes[17];    
-		nop_patch[18] = 0x52800021;    
-		nop_patch[19] = original_bytes[19];        
-
-		kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 80);
-		if (kr != KERN_SUCCESS) {
-			printf("[ERROR] Failed to write NOP patch: %s\n", mach_error_string(kr));
-
-			// Restore original bytes if patch fails
-			vm_write(task, sslWriteAddr, (vm_offset_t)original_bytes, 80);
-			return;
-		}
-
-		// Restore executable
-		kr = vm_protect(task, sslWriteAddr, 80, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-		if (kr != KERN_SUCCESS) {
-			printf("[ERROR] Failed to restore memory protection: %s\n", mach_error_string(kr));
-			return;
-		}
-
-		// Resume threads
-		for (int i = 0; i < thread_count; i++) {
-			thread_resume(threads[i]);
-		}
-		vm_deallocate(mach_task_self(), (vm_offset_t)threads, sizeof(thread_act_array_t) * thread_count);
-
-		printf("[DEBUG] Test complete - app should run normally with NOPs\n");
-	} else {
-		printf("[ERROR] sslWriteAddr is NULL or invalid.\n");
+	kr = init_ssl_breakpoint_hook(task, sslWriteAddr);
+	if (kr != KERN_SUCCESS){
+		printf("Fail");
+	}else{
+		printf("Success");
 	}
+
+
+	// if (sslWriteAddr) {
+		
+	// 	printf("[DEBUG] Patching SSL_write to return immediately (no crash test)\n");
+		
+	// 	// Simple patch: Make SSL_write return without doing anything
+	// 	// This is safer than trampoline approach for testing
+		
+	// 	thread_act_array_t threads;
+	// 	mach_msg_type_number_t thread_count;
+	// 	kr = task_threads(task, &threads, &thread_count);
+	// 	if (kr != KERN_SUCCESS) {
+	// 		printf("[ERROR] Failed to get task threads: %s\n", mach_error_string(kr));
+	// 		return;
+	// 	}
+		
+	// 	for (int i = 0; i < thread_count; i++) {
+	// 		thread_suspend(threads[i]);
+	// 	}
+		
+	// 	// Save original bytes first
+	// 	uint32_t original_bytes[64] = {0};
+	// 	vm_size_t read_size = 256;
+	// 	kr = vm_read_overwrite(task, sslWriteAddr, 256, 
+	// 	                      (vm_address_t)original_bytes, &read_size);
+	// 	if (kr != KERN_SUCCESS) {
+	// 		printf("[ERROR] Failed to read original bytes: %s\n", mach_error_string(kr));
+	// 		return;
+	// 	}
+
+	// 	printf("[DEBUG] Original Instructions: %08X %08X %08X %08X \n", 
+	// 	       original_bytes[0], original_bytes[1], 
+	// 	       original_bytes[2], original_bytes[3]);
+
+	// 	// Analyze each instruction to determine if it can be safely patched
+	// 	for (int i = 0; i < 64; i++) {
+	// 		printf("[DEBUG] Instruction %d: %08X\n", i, original_bytes[i]);
+	// 	}
+
+	// 	// Make writable
+	// 	kr = vm_protect(task, sslWriteAddr, 80, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+	// 	if (kr != KERN_SUCCESS) {
+	// 		printf("[ERROR] Failed to set memory writable: %s\n", mach_error_string(kr));
+	// 		return;
+	// 	}
+
+	// 	// Patch to: add NOP instructions without breaking the function
+	// 	uint32_t nop_patch[20];
+
+	// 	// Only replace instructions that are safe to modify
+	// 	nop_patch[0] = original_bytes[0]; 
+	// 	nop_patch[1] = original_bytes[1];      
+	// 	nop_patch[2] = original_bytes[2]; 
+	// 	nop_patch[3] = original_bytes[3]; 
+	// 	nop_patch[4] = original_bytes[4]; 
+	// 	nop_patch[5] = original_bytes[5]; 
+	// 	nop_patch[6] = original_bytes[6]; 
+	// 	nop_patch[7] = original_bytes[7]; 
+	// 	nop_patch[8] = original_bytes[8]; 
+	// 	nop_patch[9] = original_bytes[9]; 
+	// 	nop_patch[10] = original_bytes[10]; 
+	// 	nop_patch[11] = original_bytes[11]; 
+	// 	nop_patch[12] = original_bytes[12]; 
+	// 	nop_patch[13] = original_bytes[13]; 
+	// 	nop_patch[14] = original_bytes[14]; 
+	// 	nop_patch[15] = original_bytes[15]; 
+	// 	nop_patch[16] = original_bytes[16]; 
+	// 	nop_patch[17] = original_bytes[17];    
+	// 	nop_patch[18] = original_bytes[18];    
+	// 	nop_patch[19] = original_bytes[19];        
+
+	// 	kr = vm_write(task, sslWriteAddr, (vm_offset_t)nop_patch, 80);
+	// 	if (kr != KERN_SUCCESS) {
+	// 		printf("[ERROR] Failed to write NOP patch: %s\n", mach_error_string(kr));
+
+	// 		// Restore original bytes if patch fails
+	// 		vm_write(task, sslWriteAddr, (vm_offset_t)original_bytes, 80);
+	// 		return;
+	// 	}
+
+	// 	// Restore executable
+	// 	kr = vm_protect(task, sslWriteAddr, 80, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+	// 	if (kr != KERN_SUCCESS) {
+	// 		printf("[ERROR] Failed to restore memory protection: %s\n", mach_error_string(kr));
+	// 		return;
+	// 	}
+
+	// 	// Resume threads
+	// 	for (int i = 0; i < thread_count; i++) {
+	// 		thread_resume(threads[i]);
+	// 	}
+	// 	vm_deallocate(mach_task_self(), (vm_offset_t)threads, sizeof(thread_act_array_t) * thread_count);
+
+	// 	printf("[DEBUG] Test complete - app should run normally with NOPs\n");
+	// } else {
+	// 	printf("[ERROR] sslWriteAddr is NULL or invalid.\n");
+	// }
 	
 	thread_terminate(pthread);
 }

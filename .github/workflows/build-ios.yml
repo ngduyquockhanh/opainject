@@ -14,26 +14,27 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Theos Setup (Check Cache)
-      id: verify-cache
+    - name: Generate Theos cache key
+      id: theos-key
       run: |
-        echo "::set-output name=heads::`git ls-remote https://github.com/roothide/theos | head -n 1 | cut -f 1`-`git ls-remote https://github.com/xybp888/iOS-SDKs | head -n 1 | cut -f 1`"
+        THEOS_HASH=$(git ls-remote https://github.com/roothide/theos HEAD | cut -f1)
+        echo "key=theos-${THEOS_HASH}" >> $GITHUB_OUTPUT
 
-    - name: Theos Setup (Use Cache)
-      id: cache
-      uses: actions/cache@v3
+    - name: Restore Theos cache
+      uses: actions/cache@v4
       with:
-        path: ${{ github.workspace }}/theos
-        key: ${{ runner.os }}-${{ steps.verify-cache.outputs.heads }}
+        path: theos
+        key: ${{ steps.theos-key.outputs.key }}
 
-    - name: Theos Setup (Setup)
+    - name: Setup Theos (if not cached)
+      if: steps.cache.outputs.cache-hit != 'true'
       uses: NyaMisty/theos-action@master
-      with: 
+      with:
         theos-src: https://github.com/roothide/theos
-        #theos-sdks: https://github.com/xybp888/iOS-SDKs
 
-    - name: Build
+    - name: Build tweak / tool
       run: |
+        export THEOS=${{ github.workspace }}/theos
         make clean
         make
 
