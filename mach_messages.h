@@ -8,7 +8,7 @@
 #import <mach/mach.h>
 
 #pragma pack(4)
-struct MachExceptionMessage
+typedef struct MachExceptionMessage
 {
   mach_msg_header_t          header;
   mach_msg_body_t            body;
@@ -19,14 +19,14 @@ struct MachExceptionMessage
   mach_msg_type_number_t     codeCount;
   mach_exception_data_type_t code[0];
   char                       padding[512];
-};
+} MachExceptionMessage;
 #pragma pack()
 
 #pragma pack(4)
-struct MachReplyMessage
+typedef struct MachReplyMessage
 {
   mach_msg_header_t header;
   NDR_record_t      NDR;
   kern_return_t     returnCode;
-};
+} MachReplyMessage;
 #pragma pack()
