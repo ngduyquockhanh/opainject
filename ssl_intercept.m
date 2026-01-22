@@ -75,7 +75,7 @@ static void ssl_exception_callback(
     uint64_t pc = arm_thread_state64_get_pc(state);
 
     // Verify this is our SSL_write breakpoint
-    if (pc != g_ssl_write_addr + 0x1C) { 
+    if (pc != g_ssl_write_addr) { 
         printf("[INFO] Breakpoint at 0x%llx (not SSL_write, continuing)\n", pc);
         *removeBreak = false;  // Continue without removing breakpoint
         return;
@@ -159,16 +159,16 @@ bool start_ssl_interception(task_t task, uint64_t ssl_write_addr) {
     
     printf("✓ Exception ports configured\n");
     
-    // Set hardware breakpoint at SSL_write + 0x1C
+    // Set hardware breakpoint at SSL_write
     // This is after the function prologue where:
     // - X0, X1, X2 have been saved to X21, X20, X19
     // - Stack frame is set up
     // - We can safely read arguments
-    uint64_t breakpoint_addr = ssl_write_addr + 0x1C;
+    uint64_t breakpoint_addr = ssl_write_addr;
     
     SimpleDebugger_setBreakpoint(g_debugger, breakpoint_addr);
     
-    printf("✓ Hardware breakpoint set at 0x%llx (SSL_write + 0x1C)\n", breakpoint_addr);
+    printf("✓ Hardware breakpoint set at 0x%llx (SSL_write\n", breakpoint_addr);
     printf("\n🎯 Interception active! Waiting for SSL_write calls...\n");
     printf("   (No code modification - using ARM debug registers)\n\n");
     

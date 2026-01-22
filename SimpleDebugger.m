@@ -23,7 +23,7 @@
 // ARM64 BRK #0 instruction
 // Big-endian notation: 0xD4200000
 // Little-endian (iOS ARM64): 0x000020D4
-#define ARM64_BREAK_INSTRUCTION 0x000020D4
+#define ARM64_BREAK_INSTRUCTION 0xD4200000
 #define MAX_BREAKPOINTS 256
 #define GET_PC(state) ((uint64_t)arm_thread_state64_get_pc(state))
 
@@ -300,8 +300,20 @@ void SimpleDebugger_setBreakpoint(SimpleDebugger* debugger, vm_address_t address
     debugger->breakpoints[debugger->breakpointCount].active = true;
     debugger->breakpointCount++;
     
-    os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Breakpoint set at 0x%llx (saved instruction: 0x%x)", 
+    os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Breakpoint set at 0x%llx (original instruction: 0x%x)", 
            (unsigned long long)address, instruction);
+    os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Writing breakpoint instruction 0x%x at 0x%llx", 
+           ARM64_BREAK_INSTRUCTION, (unsigned long long)address);
+    
+    // Verify breakpoint was written correctly
+    uint32_t verifyInst = 0;
+    if (SimpleDebugger_readMemory(debugger, address, &verifyInst, sizeof(uint32_t))) {
+        os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Verified breakpoint at 0x%llx: 0x%x (expected 0x%x)", 
+               (unsigned long long)address, verifyInst, ARM64_BREAK_INSTRUCTION);
+    } else {
+        os_log(OS_LOG_DEFAULT, "[SimpleDebugger] FAILED to verify breakpoint at 0x%llx", 
+               (unsigned long long)address);
+    }
     
     pthread_mutex_unlock(&debugger->instructionMutex);
 }
