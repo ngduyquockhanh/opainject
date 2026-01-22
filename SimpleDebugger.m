@@ -24,7 +24,7 @@
 // ARM64 BRK #0 instruction
 // Big-endian notation: 0xD4200000
 // Little-endian (iOS ARM64): 0x000020D4
-#define ARM64_BREAK_INSTRUCTION 0x000020D4
+#define ARM64_BREAK_INSTRUCTION 0xD4200000
 #define MAX_BREAKPOINTS 256
 #define GET_PC(state) ((uint64_t)arm_thread_state64_get_pc(state))
 
