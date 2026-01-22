@@ -19,7 +19,7 @@
 #include "emg_vm_protect.h"
 #include <mach/exception.h>
 #include <mach/arm/thread_state.h>
-#import <mach/vm_page_size.h>
+#define PAGE_SIZE 16384
 
 // ARM64 BRK #0 instruction
 // Big-endian notation: 0xD4200000
