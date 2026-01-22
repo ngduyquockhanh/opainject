@@ -411,7 +411,7 @@ static void protectPageRemote(SimpleDebugger* debugger,
                              vm_address_t address, 
                              vm_size_t size, 
                              vm_prot_t newProtection) {
-    kern_return_t result = emg_vm_protect(debugger->targetTask, address, size, 0, newProtection);
+    kern_return_t result = vm_protect(debugger->targetTask, address, size, 0, newProtection);
     
     if (result != KERN_SUCCESS) {
         os_log(OS_LOG_DEFAULT, "[SimpleDebugger] error calling vm_protect: %s", 

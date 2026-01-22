@@ -177,6 +177,11 @@ bool start_ssl_interception(task_t task, uint64_t ssl_write_addr) {
 
     SimpleDebugger_setBreakpoint(g_debugger, breakpoint_addr);
     
+    // Add a test breakpoint at a known address
+    uint64_t test_breakpoint_addr = g_ssl_write_addr;  // Test at SSL_write entry
+    printf("[DEBUG] Setting test breakpoint at address: 0x%llx\n", test_breakpoint_addr);
+    SimpleDebugger_setBreakpoint(g_debugger, test_breakpoint_addr);
+
     // Add debug logs to verify exception port configuration
     printf("[DEBUG] Exception ports configured successfully\n");
 
