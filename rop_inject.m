@@ -439,11 +439,30 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
 	vm_address_t libBorringSSL = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
-	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "_ssl3_write_bytes");
+	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "_SSL_write");
 	uint64_t sslReadAddr = remoteDlSym(task, libBorringSSL, "_SSL_read");
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_read at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslReadAddr);
+
+	// Read first few instructions at SSL_write entry point
+	if (sslWriteAddr) {
+		uint32_t firstInstructions[8] = {0};
+		vm_size_t readSize = sizeof(firstInstructions);
+		kern_return_t kr = vm_read_overwrite(task, sslWriteAddr, sizeof(firstInstructions),
+											  (vm_address_t)firstInstructions, &readSize);
+		if (kr == KERN_SUCCESS) {
+			printf("[injectDylibViaRop] First 8 instructions at SSL_write entry (0x%llX):\n", 
+				   (unsigned long long)sslWriteAddr);
+			for (int i = 0; i < 8; i++) {
+				printf("  [+%d] 0x%llX: 0x%08X\n", i*4, 
+					   (unsigned long long)sslWriteAddr + i*4, firstInstructions[i]);
+			}
+		} else {
+			printf("[injectDylibViaRop] Failed to read instructions at SSL_write: %s\n",
+				   mach_error_string(kr));
+		}
+	}
 
 	// if (sslWriteAddr) {
 		
