@@ -439,7 +439,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	printf("[injectDylibViaRop] Preparation done, now injecting!\n");
 
 	vm_address_t libBorringSSL = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/libboringssl.dylib");
-	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "_SSL_write");
+	uint64_t sslWriteAddr = remoteDlSym(task, libBorringSSL, "_ssl3_write_bytes");
 	uint64_t sslReadAddr = remoteDlSym(task, libBorringSSL, "_SSL_read");
 
 	printf("[injectDylibViaRop] boringSSL found at 0x%llX, SSL_write at 0x%llX\n", (unsigned long long)libBorringSSL, (unsigned long long)sslWriteAddr);

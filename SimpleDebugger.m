@@ -315,6 +315,13 @@ void SimpleDebugger_setBreakpoint(SimpleDebugger* debugger, vm_address_t address
                (unsigned long long)address);
     }
     
+    // Disassemble the original instruction
+    os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Original instruction at 0x%llx was: 0x%x", 
+           (unsigned long long)address, instruction);
+    // Instruction 0xd503237f analysis:
+    // High byte 0xd5 = hints/barriers/sync ops group
+    // Exact meaning depends on full decoding
+    
     pthread_mutex_unlock(&debugger->instructionMutex);
 }
 
