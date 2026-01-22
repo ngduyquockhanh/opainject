@@ -493,7 +493,7 @@ static uint32_t setInstructionInternal(SimpleDebugger* debugger,
             page_addr,
             PAGE_SIZE,
             MATTR_CACHE,
-            VM_CACHE_FLUSH
+            MATTR_VAL_CACHE_FLUSH
         );
          
         
