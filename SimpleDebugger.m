@@ -541,8 +541,8 @@ static void* exceptionServer(SimpleDebugger* debugger) {
             
             pthread_mutex_unlock(&debugger->instructionMutex);
         } else {
-            os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Non-breakpoint exception (type: %d)", 
-                   exceptionMessage.exception);
+            // os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Non-breakpoint exception (type: %d)", 
+            //        exceptionMessage.exception);
             if (debugger->badAccessCallback) {
                 debugger->badAccessCallback(debugger->badAccessContext, thread, state);
             }
