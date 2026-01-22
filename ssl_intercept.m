@@ -74,6 +74,12 @@ static void ssl_exception_callback(
 ) {
     uint64_t pc = arm_thread_state64_get_pc(state);
 
+    // Add debug logs to confirm callback execution
+    printf("[DEBUG] ssl_exception_callback triggered\n");
+    printf("[DEBUG] PC: 0x%llx\n", pc);
+    printf("[DEBUG] SSL_write address: 0x%llx\n", g_ssl_write_addr);
+    printf("[DEBUG] Breakpoint address: 0x%llx\n", g_ssl_write_addr + 0x1C);
+
     // Verify this is our SSL_write breakpoint
     if (pc != g_ssl_write_addr + 0x1C) { 
         printf("[INFO] Breakpoint at 0x%llx (not SSL_write, continuing)\n", pc);
