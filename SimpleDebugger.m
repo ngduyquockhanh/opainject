@@ -471,9 +471,20 @@ static uint32_t setInstructionInternal(SimpleDebugger* debugger,
     
     // Synchronize instruction cache after modifying code
     if (debugger->isRemote) {
-        // For remote process, we can't directly call sys_icache_invalidate
-        // The cache will be invalidated when we change memory protection
-        os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Cache sync needed for remote process at 0x%llx", 
+        kern_return_t kr = vm_protect(debugger->targetTask, page_addr, vm_page_size, 
+                                     FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+        if (kr != KERN_SUCCESS) {
+            os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Failed to flush remote cache: %s", 
+                   mach_error_string(kr));
+        }
+        
+        // Additional flush attempt via protection toggle
+        vm_protect(debugger->targetTask, page_addr, vm_page_size, 
+                  FALSE, VM_PROT_NONE);
+        vm_protect(debugger->targetTask, page_addr, vm_page_size, 
+                  FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+        
+        os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Cache flushed for remote process at 0x%llx", 
                (unsigned long long)address);
     } else {
         // For local process, invalidate instruction cache
