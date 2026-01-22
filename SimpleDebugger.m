@@ -489,6 +489,71 @@ static void* exceptionServerWrapper(void* arg) {
     return exceptionServer((SimpleDebugger*)arg);
 }
 
+static void logExceptionMessage(MachExceptionMessage* msg)
+{
+    os_log(OS_LOG_DEFAULT, "====== MACH EXCEPTION MESSAGE ======");
+
+    // ---- header ----
+    os_log(OS_LOG_DEFAULT,
+           "header:"
+           " id=%d"
+           " bits=0x%x"
+           " size=%d"
+           " remote=0x%x"
+           " local=0x%x",
+           msg->header.msgh_id,
+           msg->header.msgh_bits,
+           msg->header.msgh_size,
+           msg->header.msgh_remote_port,
+           msg->header.msgh_local_port);
+
+    // ---- body ----
+    os_log(OS_LOG_DEFAULT,
+           "body descriptor count = %d",
+           msg->body.msgh_descriptor_count);
+
+    // ---- ports ----
+    os_log(OS_LOG_DEFAULT,
+           "thread port = 0x%x",
+           msg->thread.name);
+
+    os_log(OS_LOG_DEFAULT,
+           "task   port = 0x%x",
+           msg->task.name);
+
+    // ---- exception ----
+    os_log(OS_LOG_DEFAULT,
+           "exception type = %d",
+           msg->exception);
+
+    os_log(OS_LOG_DEFAULT,
+           "code count = %d",
+           msg->codeCnt);
+
+    // ---- exception codes ----
+    if (msg->codeCnt > 0 && msg->code.address) {
+
+        mach_exception_data_type_t* codes =
+            (mach_exception_data_type_t*)msg->code.address;
+
+        for (uint32_t i = 0; i < msg->codeCnt; i++) {
+            os_log(OS_LOG_DEFAULT,
+                   "code[%d] = 0x%llx",
+                   i,
+                   codes[i]);
+        }
+
+        os_log(OS_LOG_DEFAULT,
+               "code OOL address = 0x%llx size = %u",
+               (uint64_t)msg->code.address,
+               msg->code.size);
+    } else {
+        os_log(OS_LOG_DEFAULT, "no exception code data");
+    }
+
+    os_log(OS_LOG_DEFAULT, "====================================");
+}
+
 // Exception server
 static void* exceptionServer(SimpleDebugger* debugger) {
     MachExceptionMessage exceptionMessage = {{0}};
@@ -510,6 +575,8 @@ static void* exceptionServer(SimpleDebugger* debugger) {
                    mach_error_string(kr));
             continue;
         }
+
+        logExceptionMessage(&exceptionMessage);
         
         mach_port_t thread = exceptionMessage.thread.name;
         arm_thread_state64_t state;
