@@ -19,8 +19,6 @@
 #include "emg_vm_protect.h"
 #include <mach/exception.h>
 #include <mach/arm/thread_state.h>
-#include <mach/vm_machine_attribute.h>
-#define PAGE_SIZE1 16384
 
 // ARM64 BRK #0 instruction
 // Big-endian notation: 0xD4200000
@@ -187,7 +185,7 @@ bool SimpleDebugger_startDebugging(SimpleDebugger* debugger) {
         debugger->targetTask,
         EXC_MASK_BREAKPOINT | EXC_MASK_BAD_ACCESS,
         debugger->exceptionPort,
-        EXCEPTION_DEFAULT,
+        EXCEPTION_STATE_IDENTITY,
         ARM_THREAD_STATE64);
     
     if (kr != KERN_SUCCESS) {
@@ -456,7 +454,7 @@ static uint32_t setInstructionInternal(SimpleDebugger* debugger,
         return 0;
     }
     
-    vm_address_t page_addr = address & ~(PAGE_SIZE1 - 1);
+    vm_address_t page_addr = address & ~(PAGE_SIZE - 1);
 
     thread_act_array_t threads;
     mach_msg_type_number_t thread_count;
@@ -475,7 +473,7 @@ static uint32_t setInstructionInternal(SimpleDebugger* debugger,
     
     // Synchronize instruction cache after modifying code
     if (debugger->isRemote) {
-        kern_return_t kr = vm_protect(debugger->targetTask, page_addr, PAGE_SIZE1, 
+        kern_return_t kr = vm_protect(debugger->targetTask, page_addr, PAGE_SIZE, 
                                      FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
         if (kr != KERN_SUCCESS) {
             os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Failed to flush remote cache: %s", 
@@ -483,19 +481,11 @@ static uint32_t setInstructionInternal(SimpleDebugger* debugger,
         }
         
         // Additional flush attempt via protection toggle
-        vm_protect(debugger->targetTask, page_addr, PAGE_SIZE1, 
+        vm_protect(debugger->targetTask, page_addr, PAGE_SIZE, 
                   FALSE, VM_PROT_NONE);
-        vm_protect(debugger->targetTask, page_addr, PAGE_SIZE1, 
+        vm_protect(debugger->targetTask, page_addr, PAGE_SIZE, 
                   FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 
-        vm_machine_attribute(
-            debugger->targetTask,
-            page_addr,
-            PAGE_SIZE,
-            MATTR_CACHE,
-            MATTR_VAL_CACHE_FLUSH
-        );
-         
         
         os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Cache flushed for remote process at 0x%llx", 
                (unsigned long long)address);
