@@ -75,7 +75,7 @@ static void ssl_exception_callback(
     uint64_t pc = arm_thread_state64_get_pc(state);
 
     // Verify this is our SSL_write breakpoint
-    if (pc != g_ssl_write_addr + 0x1C) {
+    if (pc != g_ssl_write_addr + 0x1C) { 
         printf("[INFO] Breakpoint at 0x%llx (not SSL_write, continuing)\n", pc);
         *removeBreak = false;  // Continue without removing breakpoint
         return;
