@@ -23,7 +23,7 @@
 // ARM64 BRK #0 instruction
 // Big-endian notation: 0xD4200000
 // Little-endian (iOS ARM64): 0x000020D4
-#define ARM64_BREAK_INSTRUCTION 0xD4200000
+#define ARM64_BREAK_INSTRUCTION 0x000020D4
 #define MAX_BREAKPOINTS 256
 #define GET_PC(state) ((uint64_t)arm_thread_state64_get_pc(state))
 
@@ -558,8 +558,10 @@ static void* exceptionServer(SimpleDebugger* debugger) {
         }
         
         vm_address_t pc = GET_PC(state);
-        os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Exception received: type %d at PC 0x%llx", 
-               exceptionMessage.exception, (unsigned long long)pc);    
+        os_log(OS_LOG_DEFAULT, "[SimpleDebugger] Exception received: type %d at PC 0x%llx code[0]=0x%llx",
+            exceptionMessage.exception,
+            (unsigned long long)pc,
+            (unsigned long long)exceptionMessage.code[0]);
 
         if (exceptionMessage.exception == EXC_BREAKPOINT) {
             os_log(OS_LOG_DEFAULT, "[SimpleDebugger] EXC_BREAKPOINT detected!");
