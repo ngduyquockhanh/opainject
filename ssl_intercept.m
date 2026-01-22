@@ -69,54 +69,48 @@ static void ssl_exception_callback(
     mach_port_t thread,
     arm_thread_state64_t state,
     void* context,
-    ContinueCallback continueCallback
+    bool* removeBreak
 ) {
     uint64_t pc = arm_thread_state64_get_pc(state);
-    
+
     // Verify this is our SSL_write breakpoint
-    // We set breakpoint at SSL_write + 0x1C (after function prologue)
     if (pc != g_ssl_write_addr + 0x1C) {
         printf("[INFO] Breakpoint at 0x%llx (not SSL_write, continuing)\n", pc);
-        continueCallback(false);  // Continue without removing breakpoint
+        *removeBreak = false;  // Continue without removing breakpoint
         return;
     }
-    
+
     printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     printf("🔴 SSL_write BREAKPOINT HIT!\n");
     printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    
+
     // Extract SSL_write arguments from ARM64 registers
-    // At offset +0x1C, arguments have been saved to callee-saved registers:
-    // X19 = size (from X2)
-    // X20 = buffer pointer (from X1)
-    // X21 = SSL context (from X0)
-    
     uint64_t ssl_ptr = state.__x[21];  // X21 = SSL*
     uint64_t buf_ptr = state.__x[20];  // X20 = buf*
     uint64_t buf_len = state.__x[19];  // X19 = len
-    
+
     printf("Thread:        0x%x\n", thread);
     printf("PC:            0x%llx (SSL_write + 0x%llx)\n", pc, pc - g_ssl_write_addr);
     printf("SSL Context:   0x%llx (X21)\n", ssl_ptr);
     printf("Buffer:        0x%llx (X20)\n", buf_ptr);
     printf("Size:          %llu bytes (X19)\n", buf_len);
-    
+
     // Read buffer contents from remote process
-    if (buf_ptr && buf_len > 0 && buf_len < 10 * 1024 * 1024) {  // Sanity check (max 10MB)
+    if (buf_ptr && buf_len > 0 && buf_len < 10 * 1024 * 1024) {
         size_t read_size = (buf_len > MAX_DUMP_SIZE) ? MAX_DUMP_SIZE : buf_len;
         uint8_t* buffer = (uint8_t*)malloc(read_size);
-        
+
         if (buffer) {
             vm_size_t bytes_read = 0;
             kern_return_t kr = vm_read_overwrite(g_target_task, buf_ptr, read_size,
                                                  (vm_address_t)buffer, &bytes_read);
-            
+
             if (kr == KERN_SUCCESS && bytes_read > 0) {
                 dump_ssl_buffer(buffer, bytes_read);
             } else {
                 printf("❌ Failed to read buffer: %s\n", mach_error_string(kr));
             }
-            
+
             free(buffer);
         } else {
             printf("❌ Failed to allocate memory for buffer dump\n");
@@ -124,12 +118,12 @@ static void ssl_exception_callback(
     } else {
         printf("⚠️  Invalid buffer pointer or size\n");
     }
-    
+
     printf("✅ Continuing execution...\n");
     printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
-    
-    // Continue execution without removing breakpoint (so we catch next call)
-    continueCallback(false);
+
+    // Continue execution without removing breakpoint
+    *removeBreak = false;
 }
 
 // Initialize SSL interception
